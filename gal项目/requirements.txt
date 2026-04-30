@@ -1,0 +1,25 @@
+# Memory Lens 项目依赖
+# 数据工程核心
+pandas>=2.0.0
+pyarrow>=12.0.0
+numpy>=1.24.0
+
+# 向量数据库
+chromadb>=0.4.0
+
+# LLM 与 AI
+openai>=1.0.0
+langchain>=0.1.0
+langchain-openai>=0.0.5
+
+# NLP 工具
+jieba>=0.42.1
+snownlp>=0.12.3
+
+# 前端展示
+streamlit>=1.28.0
+plotly>=5.15.0
+
+# 其他工具
+python-dotenv>=1.0.0
+tqdm>=4.65.0
