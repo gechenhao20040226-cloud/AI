@@ -1034,10 +1034,10 @@ with tab_overview:
         st.altair_chart(gmv_chart, use_container_width=True)
 
         st.subheader("订单数趋势")
-        st.caption("展示每个时间周期的订单数量，用于判断 GMV 变化是否由订单量驱动。")
+        st.caption("展示每个时间周期的订单数量变化，用折线图观察订单量趋势。")
         orders_chart = (
             alt.Chart(monthly_plot)
-            .mark_bar()
+            .mark_line(point=True)
             .encode(
                 x=alt.X("period:N", title="时间", sort=None, axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("orders:Q", title="订单数"),
