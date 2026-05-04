@@ -1015,17 +1015,18 @@ with tab_overview:
         monthly_plot["period"] = monthly_plot["period"].astype(str)
 
         st.subheader("GMV 趋势")
+        st.caption("展示每个时间周期的销售额变化，用于观察整体增长或下滑趋势。")
         gmv_chart = (
             alt.Chart(monthly_plot)
             .mark_line(point=True)
             .encode(
-                x=alt.X("period:N", title="Period", sort=None),
-                y=alt.Y("gmv:Q", title="GMV"),
+                x=alt.X("period:N", title="时间", sort=None),
+                y=alt.Y("gmv:Q", title="销售额 GMV"),
                 tooltip=[
-                    alt.Tooltip("period:N", title="Period"),
-                    alt.Tooltip("gmv:Q", title="GMV", format=",.2f"),
-                    alt.Tooltip("orders:Q", title="Orders"),
-                    alt.Tooltip("users:Q", title="Users"),
+                    alt.Tooltip("period:N", title="时间"),
+                    alt.Tooltip("gmv:Q", title="销售额 GMV", format=",.2f"),
+                    alt.Tooltip("orders:Q", title="订单数"),
+                    alt.Tooltip("users:Q", title="用户数"),
                 ],
             )
             .properties(height=360)
@@ -1033,16 +1034,17 @@ with tab_overview:
         st.altair_chart(gmv_chart, use_container_width=True)
 
         st.subheader("订单数趋势")
+        st.caption("展示每个时间周期的订单数量变化，用于判断 GMV 变化是否由订单量驱动。")
         orders_chart = (
             alt.Chart(monthly_plot)
             .mark_bar()
             .encode(
-                x=alt.X("period:N", title="Period", sort=None),
-                y=alt.Y("orders:Q", title="Orders"),
+                x=alt.X("period:N", title="时间", sort=None),
+                y=alt.Y("orders:Q", title="订单数"),
                 tooltip=[
-                    alt.Tooltip("period:N", title="Period"),
-                    alt.Tooltip("orders:Q", title="Orders"),
-                    alt.Tooltip("gmv:Q", title="GMV", format=",.2f"),
+                    alt.Tooltip("period:N", title="时间"),
+                    alt.Tooltip("orders:Q", title="订单数"),
+                    alt.Tooltip("gmv:Q", title="销售额 GMV", format=",.2f"),
                 ],
             )
             .properties(height=320)
@@ -1055,6 +1057,12 @@ with tab_overview:
     monthly_display = monthly.copy()
     if "gmv" in monthly_display.columns:
         monthly_display["gmv"] = monthly_display["gmv"].apply(money_fmt)
+    monthly_display = monthly_display.rename(columns={
+        "period": "时间",
+        "orders": "订单数",
+        "gmv": "销售额 GMV",
+        "users": "用户数",
+    })
     st.dataframe(monthly_display, use_container_width=True, hide_index=True)
 
     st.markdown("---")
@@ -1063,6 +1071,11 @@ with tab_overview:
     if len(status_df) > 0:
         status_display = status_df.copy()
         status_display["pct"] = status_display["pct"].apply(pct_fmt)
+        status_display = status_display.rename(columns={
+            "status": "订单状态",
+            "orders": "订单数",
+            "pct": "占比",
+        })
         st.dataframe(status_display, use_container_width=True, hide_index=True)
     else:
         st.info("ℹ️ 暂无订单状态数据。")
@@ -1081,18 +1094,19 @@ with tab_product:
         top_plot_df["product_name"] = top_plot_df["product_name"].astype(str)
         top_plot_df["category"] = top_plot_df["category"].astype(str)
 
+        st.caption("按销售额排序，展示贡献最高的商品。")
         top_chart = (
             alt.Chart(top_plot_df)
             .mark_bar()
             .encode(
-                x=alt.X("revenue:Q", title="Revenue"),
-                y=alt.Y("product_name:N", title="Product", sort="-x"),
-                color=alt.Color("category:N", title="Category"),
+                x=alt.X("revenue:Q", title="销售额"),
+                y=alt.Y("product_name:N", title="商品名称", sort="-x"),
+                color=alt.Color("category:N", title="品类"),
                 tooltip=[
-                    alt.Tooltip("product_name:N", title="Product"),
-                    alt.Tooltip("category:N", title="Category"),
-                    alt.Tooltip("revenue:Q", title="Revenue", format=",.2f"),
-                    alt.Tooltip("total_qty:Q", title="Quantity"),
+                    alt.Tooltip("product_name:N", title="商品名称"),
+                    alt.Tooltip("category:N", title="品类"),
+                    alt.Tooltip("revenue:Q", title="销售额", format=",.2f"),
+                    alt.Tooltip("total_qty:Q", title="销量"),
                 ],
             )
             .properties(height=max(320, min(520, len(top_plot_df) * 36)))
@@ -1101,6 +1115,13 @@ with tab_product:
 
         top_display = top_df.copy()
         top_display["revenue"] = top_display["revenue"].apply(money_fmt)
+        top_display = top_display.rename(columns={
+            "product_id": "商品ID",
+            "product_name": "商品名称",
+            "category": "品类",
+            "total_qty": "销量",
+            "revenue": "销售额",
+        })
         st.dataframe(top_display, use_container_width=True, hide_index=True)
     else:
         st.info("ℹ️ 暂无商品销售数据。")
@@ -1113,33 +1134,37 @@ with tab_product:
 
         if len(cat_plot_df) > 0:
             cat_plot_df["category"] = cat_plot_df["category"].astype(str)
+            st.markdown("**品类销售额占比**")
+            st.caption("展示各品类在总 GMV 中的占比。")
             pie_chart = (
                 alt.Chart(cat_plot_df)
                 .mark_arc(innerRadius=55)
                 .encode(
-                    theta=alt.Theta("gmv:Q", title="GMV"),
-                    color=alt.Color("category:N", title="Category"),
+                    theta=alt.Theta("gmv:Q", title="销售额 GMV"),
+                    color=alt.Color("category:N", title="品类"),
                     tooltip=[
-                        alt.Tooltip("category:N", title="Category"),
-                        alt.Tooltip("gmv:Q", title="GMV", format=",.2f"),
-                        alt.Tooltip("orders:Q", title="Orders"),
-                        alt.Tooltip("qty:Q", title="Quantity"),
+                        alt.Tooltip("category:N", title="品类"),
+                        alt.Tooltip("gmv:Q", title="销售额 GMV", format=",.2f"),
+                        alt.Tooltip("orders:Q", title="订单数"),
+                        alt.Tooltip("qty:Q", title="销量"),
                     ],
                 )
                 .properties(height=430)
             )
             st.altair_chart(pie_chart, use_container_width=True)
 
+            st.markdown("**各品类 GMV 对比**")
+            st.caption("用于对比不同品类的绝对销售额大小。")
             category_bar = (
                 alt.Chart(cat_plot_df)
                 .mark_bar()
                 .encode(
-                    x=alt.X("category:N", title="Category", sort="-y"),
-                    y=alt.Y("gmv:Q", title="GMV"),
+                    x=alt.X("category:N", title="品类", sort="-y"),
+                    y=alt.Y("gmv:Q", title="销售额 GMV"),
                     tooltip=[
-                        alt.Tooltip("category:N", title="Category"),
-                        alt.Tooltip("gmv:Q", title="GMV", format=",.2f"),
-                        alt.Tooltip("orders:Q", title="Orders"),
+                        alt.Tooltip("category:N", title="品类"),
+                        alt.Tooltip("gmv:Q", title="销售额 GMV", format=",.2f"),
+                        alt.Tooltip("orders:Q", title="订单数"),
                     ],
                 )
                 .properties(height=320)
@@ -1150,6 +1175,12 @@ with tab_product:
 
         cat_display = cat_df.copy()
         cat_display["gmv"] = cat_display["gmv"].apply(money_fmt)
+        cat_display = cat_display.rename(columns={
+            "category": "品类",
+            "orders": "订单数",
+            "gmv": "销售额 GMV",
+            "qty": "销量",
+        })
         st.subheader("品类明细")
         st.dataframe(cat_display, use_container_width=True, hide_index=True)
     else:
@@ -1165,6 +1196,13 @@ with tab_product:
                 margin_display[col] = margin_display[col].apply(money_fmt)
         if "gross_margin_pct" in margin_display.columns:
             margin_display["gross_margin_pct"] = margin_display["gross_margin_pct"].apply(pct_fmt)
+        margin_display = margin_display.rename(columns={
+            "category": "品类",
+            "revenue": "销售额",
+            "total_cost": "总成本",
+            "gross_profit": "毛利",
+            "gross_margin_pct": "毛利率",
+        })
         st.dataframe(margin_display, use_container_width=True, hide_index=True)
 
 
@@ -1210,12 +1248,12 @@ with tab_insight:
                 alt.Chart(repurchase_df)
                 .mark_bar()
                 .encode(
-                    x=alt.X("user_level:N", title="User Level", sort="-y"),
-                    y=alt.Y("avg_spend:Q", title="Avg Spend"),
+                    x=alt.X("user_level:N", title="用户等级", sort="-y"),
+                    y=alt.Y("avg_spend:Q", title="平均消费金额"),
                     tooltip=[
-                        alt.Tooltip("user_level:N", title="User Level"),
-                        alt.Tooltip("avg_spend:Q", title="Avg Spend", format=",.2f"),
-                        alt.Tooltip("users:Q", title="Users"),
+                        alt.Tooltip("user_level:N", title="用户等级"),
+                        alt.Tooltip("avg_spend:Q", title="平均消费金额", format=",.2f"),
+                        alt.Tooltip("users:Q", title="用户数"),
                     ],
                 )
                 .properties(height=320)
@@ -1226,12 +1264,12 @@ with tab_insight:
                 alt.Chart(repurchase_df)
                 .mark_bar()
                 .encode(
-                    x=alt.X("user_level:N", title="User Level", sort="-y"),
-                    y=alt.Y("repurchase_rate:Q", title="Repurchase Rate"),
+                    x=alt.X("user_level:N", title="用户等级", sort="-y"),
+                    y=alt.Y("repurchase_rate:Q", title="复购率"),
                     tooltip=[
-                        alt.Tooltip("user_level:N", title="User Level"),
-                        alt.Tooltip("repurchase_rate:Q", title="Repurchase Rate", format=".1f"),
-                        alt.Tooltip("users:Q", title="Users"),
+                        alt.Tooltip("user_level:N", title="用户等级"),
+                        alt.Tooltip("repurchase_rate:Q", title="复购率", format=".1f"),
+                        alt.Tooltip("users:Q", title="用户数"),
                     ],
                 )
                 .properties(height=320)
@@ -1240,6 +1278,13 @@ with tab_insight:
         repurchase_display = repurchase_df.copy()
         repurchase_display["avg_spend"] = repurchase_display["avg_spend"].apply(money_fmt)
         repurchase_display["repurchase_rate"] = repurchase_display["repurchase_rate"].apply(pct_fmt)
+        repurchase_display = repurchase_display.rename(columns={
+            "user_level": "用户等级",
+            "users": "用户数",
+            "avg_orders": "平均订单数",
+            "avg_spend": "平均消费金额",
+            "repurchase_rate": "复购率",
+        })
         st.dataframe(repurchase_display, use_container_width=True, hide_index=True)
     else:
         # 切换为订单用户消费行为分析
@@ -1252,16 +1297,17 @@ with tab_insight:
             top10_plot = top10_df.sort_values("total_spend", ascending=False).copy()
             top10_plot["user_id"] = top10_plot["user_id"].astype(str)
 
+            st.caption("按用户累计消费金额排序，展示高价值用户。")
             user_spend_chart = (
                 alt.Chart(top10_plot)
                 .mark_bar()
                 .encode(
-                    x=alt.X("total_spend:Q", title="Total Spend"),
-                    y=alt.Y("user_id:N", title="User ID", sort="-x"),
+                    x=alt.X("total_spend:Q", title="消费金额"),
+                    y=alt.Y("user_id:N", title="用户ID", sort="-x"),
                     tooltip=[
-                        alt.Tooltip("user_id:N", title="User ID"),
-                        alt.Tooltip("total_spend:Q", title="Total Spend", format=",.2f"),
-                        alt.Tooltip("order_count:Q", title="Orders"),
+                        alt.Tooltip("user_id:N", title="用户ID"),
+                        alt.Tooltip("total_spend:Q", title="消费金额", format=",.2f"),
+                        alt.Tooltip("order_count:Q", title="订单数"),
                     ],
                 )
                 .properties(height=max(320, min(520, len(top10_plot) * 36)))
@@ -1269,24 +1315,46 @@ with tab_insight:
             st.altair_chart(user_spend_chart, use_container_width=True)
 
         if len(users_df) > 0 and "order_count" in users_df.columns:
-            order_hist = (
-                alt.Chart(users_df)
+            st.subheader("📊 用户订单次数分布")
+            st.caption("展示下单 1 次、2 次、3 次等不同订单次数的用户数量，适合观察用户复购情况。")
+
+            order_dist = (
+                users_df.groupby("order_count", as_index=False)
+                .agg(users=("user_id", "nunique"))
+                .sort_values("order_count")
+            )
+            order_dist["order_count_label"] = order_dist["order_count"].astype(int).astype(str) + " 单"
+
+            order_count_chart = (
+                alt.Chart(order_dist)
                 .mark_bar()
                 .encode(
-                    x=alt.X("order_count:Q", bin=alt.Bin(maxbins=15), title="Order Count"),
-                    y=alt.Y("count():Q", title="Users"),
+                    x=alt.X(
+                        "order_count_label:N",
+                        title="订单次数",
+                        sort=order_dist["order_count_label"].tolist(),
+                    ),
+                    y=alt.Y("users:Q", title="用户数"),
                     tooltip=[
-                        alt.Tooltip("count():Q", title="Users"),
+                        alt.Tooltip("order_count_label:N", title="订单次数"),
+                        alt.Tooltip("users:Q", title="用户数"),
                     ],
                 )
                 .properties(height=320)
             )
-            st.altair_chart(order_hist, use_container_width=True)
+            st.altair_chart(order_count_chart, use_container_width=True)
 
         if len(users_df) > 0:
             st.subheader("💰 高价值用户 Top 20 明细")
             users_display = users_df.head(20).copy()
             users_display["total_spend"] = users_display["total_spend"].apply(money_fmt)
+            users_display = users_display.rename(columns={
+                "user_id": "用户ID",
+                "user_level": "用户等级",
+                "city": "城市",
+                "order_count": "订单数",
+                "total_spend": "累计消费金额",
+            })
             st.dataframe(users_display, use_container_width=True, hide_index=True)
 
     st.markdown("---")
@@ -1305,6 +1373,21 @@ with tab_insight:
         high_value_display = pd.DataFrame(high_value_orders)
         if "total_amount" in high_value_display.columns:
             high_value_display["total_amount"] = high_value_display["total_amount"].apply(money_fmt)
+        high_value_display = high_value_display.rename(columns={
+            "order_id": "订单ID",
+            "user_id": "用户ID",
+            "product_id": "商品ID",
+            "product_name": "商品名称",
+            "category": "品类",
+            "order_date": "订单时间",
+            "quantity": "数量",
+            "unit_price": "单价",
+            "total_amount": "订单金额",
+            "status": "原始状态",
+            "status_norm": "标准状态",
+            "city": "城市",
+            "is_anomaly": "是否异常",
+        })
         st.dataframe(high_value_display, use_container_width=True, hide_index=True)
 
     st.markdown("---")
