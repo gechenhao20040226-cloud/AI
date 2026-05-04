@@ -1082,14 +1082,24 @@ with tab_product:
     st.markdown("---")
     st.subheader("📦 品类销售分布")
     if len(cat_df) > 0 and all(c in cat_df.columns for c in ["category", "gmv"]):
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.bar(cat_df["category"].astype(str), cat_df["gmv"])
-        ax.set_xlabel("Category")
-        ax.set_ylabel("GMV")
-        ax.tick_params(axis="x", rotation=45)
-        fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+        cat_plot_df = cat_df.copy()
+        cat_plot_df = cat_plot_df[cat_plot_df["gmv"].fillna(0) > 0].sort_values("gmv", ascending=False)
+
+        if len(cat_plot_df) > 0:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            ax.pie(
+                cat_plot_df["gmv"],
+                labels=cat_plot_df["category"].astype(str),
+                autopct="%1.1f%%",
+                startangle=90,
+            )
+            ax.set_title("品类销售额占比")
+            ax.axis("equal")
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+        else:
+            st.info("ℹ️ 当前品类 GMV 均为空或小于等于 0，无法绘制饼图。")
 
         cat_display = cat_df.copy()
         cat_display["gmv"] = cat_display["gmv"].apply(money_fmt)
