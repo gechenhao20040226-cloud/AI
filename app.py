@@ -1015,12 +1015,12 @@ with tab_overview:
         monthly_plot["period"] = monthly_plot["period"].astype(str)
 
         st.subheader("GMV 趋势")
-        st.caption("展示每个时间周期的销售额变化，用于观察整体增长或下滑趋势。")
+        st.caption("展示每个时间周期的销售额变化，用折线图观察整体增长或下滑趋势。")
         gmv_chart = (
             alt.Chart(monthly_plot)
             .mark_line(point=True)
             .encode(
-                x=alt.X("period:N", title="时间", sort=None),
+                x=alt.X("period:N", title="时间", sort=None, axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("gmv:Q", title="销售额 GMV"),
                 tooltip=[
                     alt.Tooltip("period:N", title="时间"),
@@ -1034,12 +1034,12 @@ with tab_overview:
         st.altair_chart(gmv_chart, use_container_width=True)
 
         st.subheader("订单数趋势")
-        st.caption("展示每个时间周期的订单数量变化，用于判断 GMV 变化是否由订单量驱动。")
+        st.caption("展示每个时间周期的订单数量，用于判断 GMV 变化是否由订单量驱动。")
         orders_chart = (
             alt.Chart(monthly_plot)
             .mark_bar()
             .encode(
-                x=alt.X("period:N", title="时间", sort=None),
+                x=alt.X("period:N", title="时间", sort=None, axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("orders:Q", title="订单数"),
                 tooltip=[
                     alt.Tooltip("period:N", title="时间"),
@@ -1159,7 +1159,7 @@ with tab_product:
                 alt.Chart(cat_plot_df)
                 .mark_bar()
                 .encode(
-                    x=alt.X("category:N", title="品类", sort="-y"),
+                    x=alt.X("category:N", title="品类", sort="-y", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("gmv:Q", title="销售额 GMV"),
                     tooltip=[
                         alt.Tooltip("category:N", title="品类"),
@@ -1248,7 +1248,7 @@ with tab_insight:
                 alt.Chart(repurchase_df)
                 .mark_bar()
                 .encode(
-                    x=alt.X("user_level:N", title="用户等级", sort="-y"),
+                    x=alt.X("user_level:N", title="用户等级", sort="-y", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("avg_spend:Q", title="平均消费金额"),
                     tooltip=[
                         alt.Tooltip("user_level:N", title="用户等级"),
@@ -1264,7 +1264,7 @@ with tab_insight:
                 alt.Chart(repurchase_df)
                 .mark_bar()
                 .encode(
-                    x=alt.X("user_level:N", title="用户等级", sort="-y"),
+                    x=alt.X("user_level:N", title="用户等级", sort="-y", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("repurchase_rate:Q", title="复购率"),
                     tooltip=[
                         alt.Tooltip("user_level:N", title="用户等级"),
@@ -1333,6 +1333,7 @@ with tab_insight:
                         "order_count_label:N",
                         title="订单次数",
                         sort=order_dist["order_count_label"].tolist(),
+                        axis=alt.Axis(labelAngle=0),
                     ),
                     y=alt.Y("users:Q", title="用户数"),
                     tooltip=[
