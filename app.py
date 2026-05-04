@@ -20,9 +20,7 @@ from datetime import datetime
 import duckdb
 import pandas as pd
 import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import matplotlib.pyplot as plt
 from openai import OpenAI
 
 # 导入清洗 Pipeline
@@ -40,25 +38,6 @@ st.set_page_config(
 )
 
 conn = duckdb.connect(database=":memory:")
-
-# Plotly 全局配置：只保留 Download as PNG，隐藏其他右上角交互按钮
-PLOTLY_CONFIG = {
-    "displaylogo": False,
-    "modeBarButtonsToRemove": [
-        "zoom2d",
-        "pan2d",
-        "select2d",
-        "lasso2d",
-        "zoomIn2d",
-        "zoomOut2d",
-        "autoScale2d",
-        "resetScale2d",
-        "hoverClosestCartesian",
-        "hoverCompareCartesian",
-        "toggleSpikelines",
-    ],
-}
-
 
 # =========================
 # 基础工具函数
