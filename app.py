@@ -39,6 +39,11 @@ st.set_page_config(
 
 conn = duckdb.connect(database=":memory:")
 
+# Matplotlib 全局配置：使用静态图，减少移动端/Safari 前端模块加载失败的概率
+plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "Noto Sans CJK SC", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
 # =========================
 # 基础工具函数
 # =========================
@@ -1008,42 +1013,28 @@ with tab_overview:
     st.subheader(f"📈 销售趋势（按{period_label}汇总）")
 
     if len(monthly) > 0 and all(c in monthly.columns for c in ["period", "gmv", "orders"]):
-        if len(monthly) == 1:
-            st.info(f"ℹ️ 当前只有 1 个{period_label}度数据点，已使用柱状图展示。")
-            fig = px.bar(monthly, x="period", y="gmv", title="GMV", text="gmv")
-        else:
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_trace(
-                go.Bar(
-                    x=monthly["period"],
-                    y=monthly["orders"],
-                    name="订单数",
-                    opacity=0.45,
-                ),
-                secondary_y=False,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=monthly["period"],
-                    y=monthly["gmv"],
-                    name="GMV",
-                    mode="lines+markers",
-                    line=dict(width=3),
-                    marker=dict(size=8),
-                ),
-                secondary_y=True,
-            )
-            fig.update_layout(
-                height=430,
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                template="plotly_white",
-                margin=dict(l=0, r=0, t=40, b=0),
-            )
-            fig.update_yaxes(title_text="订单数", secondary_y=False, showgrid=False)
-            fig.update_yaxes(title_text="GMV", secondary_y=True, showgrid=True)
+        monthly_plot = monthly.copy()
+        monthly_plot["period"] = monthly_plot["period"].astype(str)
 
-        st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+        st.subheader("GMV 趋势")
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(monthly_plot["period"], monthly_plot["gmv"], marker="o")
+        ax.set_xlabel("Period")
+        ax.set_ylabel("GMV")
+        ax.tick_params(axis="x", rotation=45)
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+        st.subheader("订单数趋势")
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.bar(monthly_plot["period"], monthly_plot["orders"])
+        ax.set_xlabel("Period")
+        ax.set_ylabel("Orders")
+        ax.tick_params(axis="x", rotation=45)
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
     else:
         st.info("ℹ️ 暂无销售趋势数据。")
 
@@ -1074,16 +1065,13 @@ with tab_product:
     st.subheader("🔥 Top 10 商品（按销售额）")
     if len(top_df) > 0 and "revenue" in top_df.columns:
         top_plot_df = top_df.sort_values("revenue", ascending=True)
-        fig_prod = px.bar(
-            top_plot_df,
-            x="revenue",
-            y="product_name",
-            orientation="h",
-            color="category",
-            title="商品销售额排行",
-        )
-        fig_prod.update_layout(height=400, template="plotly_white")
-        st.plotly_chart(fig_prod, use_container_width=True, config=PLOTLY_CONFIG)
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.barh(top_plot_df["product_name"].astype(str), top_plot_df["revenue"])
+        ax.set_xlabel("Revenue")
+        ax.set_ylabel("Product")
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
 
         top_display = top_df.copy()
         top_display["revenue"] = top_display["revenue"].apply(money_fmt)
@@ -1094,19 +1082,14 @@ with tab_product:
     st.markdown("---")
     st.subheader("📦 品类销售分布")
     if len(cat_df) > 0 and all(c in cat_df.columns for c in ["category", "gmv"]):
-        pie_col, bar_col = st.columns(2)
-        with pie_col:
-            st.plotly_chart(
-                px.pie(cat_df, values="gmv", names="category", title="品类销售额占比", hole=0.4),
-                use_container_width=True,
-                config=PLOTLY_CONFIG,
-            )
-        with bar_col:
-            st.plotly_chart(
-                px.bar(cat_df, x="category", y="gmv", color="category", title="各品类 GMV 对比"),
-                use_container_width=True,
-                config=PLOTLY_CONFIG,
-            )
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.bar(cat_df["category"].astype(str), cat_df["gmv"])
+        ax.set_xlabel("Category")
+        ax.set_ylabel("GMV")
+        ax.tick_params(axis="x", rotation=45)
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
 
         cat_display = cat_df.copy()
         cat_display["gmv"] = cat_display["gmv"].apply(money_fmt)
@@ -1166,29 +1149,23 @@ with tab_insight:
         st.subheader("👥 用户等级分析")
         u_col1, u_col2 = st.columns(2)
         with u_col1:
-            st.plotly_chart(
-                px.bar(
-                    repurchase_df,
-                    x="user_level",
-                    y="avg_spend",
-                    color="user_level",
-                    title="各等级用户平均消费",
-                ),
-                use_container_width=True,
-                config=PLOTLY_CONFIG,
-            )
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.bar(repurchase_df["user_level"].astype(str), repurchase_df["avg_spend"])
+            ax.set_xlabel("User Level")
+            ax.set_ylabel("Avg Spend")
+            ax.tick_params(axis="x", rotation=30)
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
         with u_col2:
-            st.plotly_chart(
-                px.bar(
-                    repurchase_df,
-                    x="user_level",
-                    y="repurchase_rate",
-                    color="user_level",
-                    title="各等级用户复购率",
-                ),
-                use_container_width=True,
-                config=PLOTLY_CONFIG,
-            )
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.bar(repurchase_df["user_level"].astype(str), repurchase_df["repurchase_rate"])
+            ax.set_xlabel("User Level")
+            ax.set_ylabel("Repurchase Rate")
+            ax.tick_params(axis="x", rotation=30)
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
         repurchase_display = repurchase_df.copy()
         repurchase_display["avg_spend"] = repurchase_display["avg_spend"].apply(money_fmt)
         repurchase_display["repurchase_rate"] = repurchase_display["repurchase_rate"].apply(pct_fmt)
@@ -1201,30 +1178,23 @@ with tab_insight:
 
         if len(users_df) > 0 and "total_spend" in users_df.columns:
             top10_df = users_df.head(10).copy()
-            fig_spend = px.bar(
-                top10_df.sort_values("total_spend", ascending=True),
-                x="total_spend",
-                y="user_id",
-                orientation="h",
-                title="用户消费金额 Top 10",
-                color="total_spend",
-                color_continuous_scale="Blues",
-            )
-            fig_spend.update_layout(height=350, template="plotly_white", showlegend=False)
-            st.plotly_chart(fig_spend, use_container_width=True, config=PLOTLY_CONFIG)
+            top10_plot = top10_df.sort_values("total_spend", ascending=True)
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.barh(top10_plot["user_id"].astype(str), top10_plot["total_spend"])
+            ax.set_xlabel("Total Spend")
+            ax.set_ylabel("User ID")
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
 
         if len(users_df) > 0 and "order_count" in users_df.columns:
-            fig_orders = px.histogram(
-                users_df,
-                x="order_count",
-                nbins=15,
-                title="用户订单数分布",
-                color_discrete_sequence=["#636EFA"],
-            )
-            fig_orders.update_layout(height=300, template="plotly_white", showlegend=False)
-            fig_orders.update_xaxes(title="订单数")
-            fig_orders.update_yaxes(title="用户数")
-            st.plotly_chart(fig_orders, use_container_width=True, config=PLOTLY_CONFIG)
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.hist(users_df["order_count"], bins=15)
+            ax.set_xlabel("Order Count")
+            ax.set_ylabel("Users")
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
 
         if len(users_df) > 0:
             st.subheader("💰 高价值用户 Top 20 明细")
@@ -1283,7 +1253,7 @@ with tab_insight:
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray;'>"
-    "AI 电商分析助手 | Streamlit + DuckDB + Plotly + GLM-4-Flash"
+    "AI 电商分析助手 | Streamlit + DuckDB + Matplotlib + GLM-4-Flash"
     "</div>",
     unsafe_allow_html=True,
 )
