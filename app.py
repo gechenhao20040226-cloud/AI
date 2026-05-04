@@ -20,7 +20,7 @@ from datetime import datetime
 import duckdb
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
+import altair as alt
 from openai import OpenAI
 
 # 导入清洗 Pipeline
@@ -39,9 +39,7 @@ st.set_page_config(
 
 conn = duckdb.connect(database=":memory:")
 
-# Matplotlib 全局配置：使用静态图，减少移动端/Safari 前端模块加载失败的概率
-plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "Noto Sans CJK SC", "DejaVu Sans"]
-plt.rcParams["axes.unicode_minus"] = False
+# Altair 图表使用浏览器字体渲染，中文标签更稳定，并且会随页面宽度自适应。
 
 
 # =========================
@@ -1017,24 +1015,39 @@ with tab_overview:
         monthly_plot["period"] = monthly_plot["period"].astype(str)
 
         st.subheader("GMV 趋势")
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(monthly_plot["period"], monthly_plot["gmv"], marker="o")
-        ax.set_xlabel("Period")
-        ax.set_ylabel("GMV")
-        ax.tick_params(axis="x", rotation=45)
-        fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+        gmv_chart = (
+            alt.Chart(monthly_plot)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("period:N", title="Period", sort=None),
+                y=alt.Y("gmv:Q", title="GMV"),
+                tooltip=[
+                    alt.Tooltip("period:N", title="Period"),
+                    alt.Tooltip("gmv:Q", title="GMV", format=",.2f"),
+                    alt.Tooltip("orders:Q", title="Orders"),
+                    alt.Tooltip("users:Q", title="Users"),
+                ],
+            )
+            .properties(height=360)
+        )
+        st.altair_chart(gmv_chart, use_container_width=True)
 
         st.subheader("订单数趋势")
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.bar(monthly_plot["period"], monthly_plot["orders"])
-        ax.set_xlabel("Period")
-        ax.set_ylabel("Orders")
-        ax.tick_params(axis="x", rotation=45)
-        fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+        orders_chart = (
+            alt.Chart(monthly_plot)
+            .mark_bar()
+            .encode(
+                x=alt.X("period:N", title="Period", sort=None),
+                y=alt.Y("orders:Q", title="Orders"),
+                tooltip=[
+                    alt.Tooltip("period:N", title="Period"),
+                    alt.Tooltip("orders:Q", title="Orders"),
+                    alt.Tooltip("gmv:Q", title="GMV", format=",.2f"),
+                ],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(orders_chart, use_container_width=True)
     else:
         st.info("ℹ️ 暂无销售趋势数据。")
 
@@ -1064,14 +1077,27 @@ with tab_product:
 
     st.subheader("🔥 Top 10 商品（按销售额）")
     if len(top_df) > 0 and "revenue" in top_df.columns:
-        top_plot_df = top_df.sort_values("revenue", ascending=True)
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.barh(top_plot_df["product_name"].astype(str), top_plot_df["revenue"])
-        ax.set_xlabel("Revenue")
-        ax.set_ylabel("Product")
-        fig.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+        top_plot_df = top_df.sort_values("revenue", ascending=False).copy()
+        top_plot_df["product_name"] = top_plot_df["product_name"].astype(str)
+        top_plot_df["category"] = top_plot_df["category"].astype(str)
+
+        top_chart = (
+            alt.Chart(top_plot_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("revenue:Q", title="Revenue"),
+                y=alt.Y("product_name:N", title="Product", sort="-x"),
+                color=alt.Color("category:N", title="Category"),
+                tooltip=[
+                    alt.Tooltip("product_name:N", title="Product"),
+                    alt.Tooltip("category:N", title="Category"),
+                    alt.Tooltip("revenue:Q", title="Revenue", format=",.2f"),
+                    alt.Tooltip("total_qty:Q", title="Quantity"),
+                ],
+            )
+            .properties(height=max(320, min(520, len(top_plot_df) * 36)))
+        )
+        st.altair_chart(top_chart, use_container_width=True)
 
         top_display = top_df.copy()
         top_display["revenue"] = top_display["revenue"].apply(money_fmt)
@@ -1086,20 +1112,41 @@ with tab_product:
         cat_plot_df = cat_plot_df[cat_plot_df["gmv"].fillna(0) > 0].sort_values("gmv", ascending=False)
 
         if len(cat_plot_df) > 0:
-            fig, ax = plt.subplots(figsize=(8, 6))
-            ax.pie(
-                cat_plot_df["gmv"],
-                labels=cat_plot_df["category"].astype(str),
-                autopct="%1.1f%%",
-                startangle=90,
+            cat_plot_df["category"] = cat_plot_df["category"].astype(str)
+            pie_chart = (
+                alt.Chart(cat_plot_df)
+                .mark_arc(innerRadius=55)
+                .encode(
+                    theta=alt.Theta("gmv:Q", title="GMV"),
+                    color=alt.Color("category:N", title="Category"),
+                    tooltip=[
+                        alt.Tooltip("category:N", title="Category"),
+                        alt.Tooltip("gmv:Q", title="GMV", format=",.2f"),
+                        alt.Tooltip("orders:Q", title="Orders"),
+                        alt.Tooltip("qty:Q", title="Quantity"),
+                    ],
+                )
+                .properties(height=430)
             )
-            ax.set_title("品类销售额占比")
-            ax.axis("equal")
-            fig.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
+            st.altair_chart(pie_chart, use_container_width=True)
+
+            category_bar = (
+                alt.Chart(cat_plot_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("category:N", title="Category", sort="-y"),
+                    y=alt.Y("gmv:Q", title="GMV"),
+                    tooltip=[
+                        alt.Tooltip("category:N", title="Category"),
+                        alt.Tooltip("gmv:Q", title="GMV", format=",.2f"),
+                        alt.Tooltip("orders:Q", title="Orders"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(category_bar, use_container_width=True)
         else:
-            st.info("ℹ️ 当前品类 GMV 均为空或小于等于 0，无法绘制饼图。")
+            st.info("ℹ️ 当前品类 GMV 均为空或小于等于 0，无法绘制品类图。")
 
         cat_display = cat_df.copy()
         cat_display["gmv"] = cat_display["gmv"].apply(money_fmt)
@@ -1159,23 +1206,37 @@ with tab_insight:
         st.subheader("👥 用户等级分析")
         u_col1, u_col2 = st.columns(2)
         with u_col1:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.bar(repurchase_df["user_level"].astype(str), repurchase_df["avg_spend"])
-            ax.set_xlabel("User Level")
-            ax.set_ylabel("Avg Spend")
-            ax.tick_params(axis="x", rotation=30)
-            fig.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
+            spend_chart = (
+                alt.Chart(repurchase_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("user_level:N", title="User Level", sort="-y"),
+                    y=alt.Y("avg_spend:Q", title="Avg Spend"),
+                    tooltip=[
+                        alt.Tooltip("user_level:N", title="User Level"),
+                        alt.Tooltip("avg_spend:Q", title="Avg Spend", format=",.2f"),
+                        alt.Tooltip("users:Q", title="Users"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(spend_chart, use_container_width=True)
         with u_col2:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.bar(repurchase_df["user_level"].astype(str), repurchase_df["repurchase_rate"])
-            ax.set_xlabel("User Level")
-            ax.set_ylabel("Repurchase Rate")
-            ax.tick_params(axis="x", rotation=30)
-            fig.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
+            repurchase_chart = (
+                alt.Chart(repurchase_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("user_level:N", title="User Level", sort="-y"),
+                    y=alt.Y("repurchase_rate:Q", title="Repurchase Rate"),
+                    tooltip=[
+                        alt.Tooltip("user_level:N", title="User Level"),
+                        alt.Tooltip("repurchase_rate:Q", title="Repurchase Rate", format=".1f"),
+                        alt.Tooltip("users:Q", title="Users"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(repurchase_chart, use_container_width=True)
         repurchase_display = repurchase_df.copy()
         repurchase_display["avg_spend"] = repurchase_display["avg_spend"].apply(money_fmt)
         repurchase_display["repurchase_rate"] = repurchase_display["repurchase_rate"].apply(pct_fmt)
@@ -1188,23 +1249,39 @@ with tab_insight:
 
         if len(users_df) > 0 and "total_spend" in users_df.columns:
             top10_df = users_df.head(10).copy()
-            top10_plot = top10_df.sort_values("total_spend", ascending=True)
-            fig, ax = plt.subplots(figsize=(10, 5))
-            ax.barh(top10_plot["user_id"].astype(str), top10_plot["total_spend"])
-            ax.set_xlabel("Total Spend")
-            ax.set_ylabel("User ID")
-            fig.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
+            top10_plot = top10_df.sort_values("total_spend", ascending=False).copy()
+            top10_plot["user_id"] = top10_plot["user_id"].astype(str)
+
+            user_spend_chart = (
+                alt.Chart(top10_plot)
+                .mark_bar()
+                .encode(
+                    x=alt.X("total_spend:Q", title="Total Spend"),
+                    y=alt.Y("user_id:N", title="User ID", sort="-x"),
+                    tooltip=[
+                        alt.Tooltip("user_id:N", title="User ID"),
+                        alt.Tooltip("total_spend:Q", title="Total Spend", format=",.2f"),
+                        alt.Tooltip("order_count:Q", title="Orders"),
+                    ],
+                )
+                .properties(height=max(320, min(520, len(top10_plot) * 36)))
+            )
+            st.altair_chart(user_spend_chart, use_container_width=True)
 
         if len(users_df) > 0 and "order_count" in users_df.columns:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.hist(users_df["order_count"], bins=15)
-            ax.set_xlabel("Order Count")
-            ax.set_ylabel("Users")
-            fig.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
+            order_hist = (
+                alt.Chart(users_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("order_count:Q", bin=alt.Bin(maxbins=15), title="Order Count"),
+                    y=alt.Y("count():Q", title="Users"),
+                    tooltip=[
+                        alt.Tooltip("count():Q", title="Users"),
+                    ],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(order_hist, use_container_width=True)
 
         if len(users_df) > 0:
             st.subheader("💰 高价值用户 Top 20 明细")
@@ -1263,7 +1340,7 @@ with tab_insight:
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray;'>"
-    "AI 电商分析助手 | Streamlit + DuckDB + Matplotlib + GLM-4-Flash"
+    "AI 电商分析助手 | Streamlit + DuckDB + Altair + GLM-4-Flash"
     "</div>",
     unsafe_allow_html=True,
 )
