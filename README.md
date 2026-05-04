@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/27337954/README.md)
 # AI 电商分析助手
 
 一个基于 **Streamlit + DuckDB + Plotly + GLM-4-Flash** 的电商数据分析 Dashboard。  
