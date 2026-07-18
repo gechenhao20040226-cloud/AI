@@ -267,8 +267,9 @@ def prepare_orders_dataframe(df_orders):
     else:
         df["status_norm"] = "completed"
 
-    # 日期无法识别的行会导致趋势图无意义，直接过滤
-    df = df.dropna(subset=["order_date"]).copy()
+    # 有时间字段时过滤个别无效日期；整张表没有时间时保留订单，仅跳过趋势分析。
+    if df["order_date"].notna().any():
+        df = df.dropna(subset=["order_date"]).copy()
 
     return df
 
@@ -284,6 +285,16 @@ def get_status_condition(selected_statuses=None):
         return "1 = 0", "1 = 0"
     values = ", ".join(f"'{status}'" for status in selected)
     return f"status_norm IN ({values})", f"o.status_norm IN ({values})"
+
+
+def has_valid_order_dates():
+    """判断当前订单表是否包含至少一个有效时间。"""
+    try:
+        return bool(conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE order_date IS NOT NULL"
+        ).fetchone()[0])
+    except Exception:
+        return False
 
 
 def run_analysis(granularity="月", selected_statuses=None):
@@ -308,22 +319,30 @@ def run_analysis(granularity="月", selected_statuses=None):
         WHERE {s_cond}
     """).fetchdf().to_dict("records")[0]
 
-    results["monthly"] = conn.execute(f"""
-        SELECT
-            {period_expr} AS period,
-            COUNT(DISTINCT order_id) AS orders,
-            SUM(total_amount) AS gmv,
-            COUNT(DISTINCT user_id) AS users
-        FROM orders
-        WHERE {s_cond}
-        GROUP BY 1
-        ORDER BY 1
-    """).df()
+    if has_valid_order_dates():
+        results["monthly"] = conn.execute(f"""
+            SELECT
+                {period_expr} AS period,
+                COUNT(DISTINCT order_id) AS orders,
+                SUM(total_amount) AS gmv,
+                COUNT(DISTINCT user_id) AS users
+            FROM orders
+            WHERE {s_cond} AND order_date IS NOT NULL
+            GROUP BY 1
+            ORDER BY 1
+        """).df()
+    else:
+        results["monthly"] = pd.DataFrame(columns=["period", "orders", "gmv", "users"])
 
     results["top_products"] = conn.execute(f"""
         SELECT
             o.product_id,
-            COALESCE(NULLIF(CAST(o.product_name AS VARCHAR), ''), p.product_name, o.product_id, '未知商品') AS product_name,
+            COALESCE(
+                NULLIF(CAST(o.product_name AS VARCHAR), ''),
+                CAST(p.product_name AS VARCHAR),
+                CAST(o.product_id AS VARCHAR),
+                '未知商品'
+            ) AS product_name,
             COALESCE(NULLIF(CAST(o.category AS VARCHAR), ''), p.category, '未分类') AS category,
             SUM(o.quantity) AS total_qty,
             SUM(o.total_amount) AS revenue
@@ -557,8 +576,9 @@ def get_ai_insights(analysis_data, missing_dimensions=None):
 1. 只能基于给出的统计结果分析，不能编造数据。
 2. 如果出现 unknown、未知、未分类，必须把它当作数据质量问题提示，不能强行做用户画像或商品判断。
 3. 如果缺失维度里包含 user_id（用户维度），用户分析部分必须明确写：原数据缺乏用户维度，无法分析。
-4. 建议要具体，不要写空话。
-5. 语气像企业内部数据分析报告，不要太学术。
+4. 如果缺失维度里包含 order_date（时间维度），只能分析整体结果，必须明确说明无法判断趋势和环比。
+5. 建议要具体，不要写空话。
+6. 语气像企业内部数据分析报告，不要太学术。
 
 【缺失维度】
 {missing_context}
@@ -569,7 +589,7 @@ def get_ai_insights(analysis_data, missing_dimensions=None):
 请严格按以下结构输出：
 
 ### 1. 核心销售结论
-- 用 2-4 条 bullet 总结 GMV、订单数、客单价、趋势。
+- 用 2-4 条 bullet 总结 GMV、订单数、客单价；只有存在时间维度时才能总结趋势。
 
 ### 2. Top 商品与品类表现
 - 说明销售贡献最高的商品/品类。
@@ -683,7 +703,7 @@ if not st.session_state.get("upload_success"):
                     st.dataframe(raw_upload_df.head(10), width="stretch", hide_index=True)
 
                 st.markdown("#### 确认字段对应关系")
-                st.caption("系统已自动选择最可能的字段。请重点确认订单时间、实付金额和订单ID；不需要的字段保持“不使用”。")
+                st.caption("系统已自动选择最可能的字段。请重点确认实付金额和订单ID；没有订单时间也可以保持“不使用”。")
 
                 source_columns = [str(column) for column in raw_upload_df.columns]
                 options = ["不使用"] + source_columns
@@ -711,7 +731,18 @@ if not st.session_state.get("upload_success"):
                 if submitted:
                     try:
                         mapped_df = apply_column_mapping(raw_upload_df, field_to_source)
+                        status_mapping_note = None
+                        status_source = field_to_source.get("status")
+                        if status_source and "售后" in str(status_source) and "status" in mapped_df.columns:
+                            no_after_sale = (
+                                mapped_df["status"].isna()
+                                | mapped_df["status"].astype(str).str.strip().isin(["", "nan", "None"])
+                            )
+                            mapped_df.loc[no_after_sale, "status"] = "已完成"
+                            status_mapping_note = "售后状态为空的记录已按正常完成订单处理，退款记录仍按退款处理。"
                         validation_errors, validation_warnings = validate_mapped_orders(mapped_df)
+                        if status_mapping_note:
+                            validation_warnings.append(status_mapping_note)
 
                         if validation_errors:
                             for message in validation_errors:
@@ -726,7 +757,7 @@ if not st.session_state.get("upload_success"):
                             cleaned_df = prepare_orders_dataframe(cleaned_df)
 
                             if cleaned_df.empty:
-                                st.error("❌ 清洗后没有有效订单。请重新检查订单时间字段是否选择正确。")
+                                st.error("❌ 清洗后没有可分析的有效订单，请检查金额和字段对应关系。")
                             else:
                                 st.session_state["upload_success"] = True
                                 st.session_state["upload_count"] = len(cleaned_df)
@@ -794,6 +825,7 @@ else:
 # 粒度选择与分析执行
 # =========================
 recommended_granularity = get_recommended_granularity()
+time_dimension_available = has_valid_order_dates()
 control_col1, control_col2 = st.columns([1, 2])
 with control_col1:
     granularity = st.radio(
@@ -801,8 +833,11 @@ with control_col1:
         options=["月", "日"],
         index=0 if recommended_granularity == "月" else 1,
         horizontal=True,
+        disabled=not time_dimension_available,
         help="数据跨度较短时建议选择「日」，长期数据建议选择「月」。"
     )
+    if not time_dimension_available:
+        st.caption("未提供订单时间，已跳过趋势和环比分析。")
 
 status_labels = {
     "completed": "已完成 / 已支付",
@@ -873,7 +908,7 @@ with kpi4:
     else:
         st.metric("客单价", money_fmt(summary.get("avg_order_value")))
 with kpi5:
-    if amount_actually_missing:
+    if amount_actually_missing or not time_dimension_available:
         st.metric("GMV 环比", "—")
     else:
         st.metric("GMV 环比", gmv_change_text, delta=gmv_change_text if gmv_change_value is not None else None)
@@ -897,7 +932,10 @@ tab_overview, tab_product, tab_insight = st.tabs([
 # -------------------------
 with tab_overview:
     period_label = "日" if granularity == "日" else "月"
-    st.subheader(f"📈 销售趋势（按{period_label}汇总）")
+    if time_dimension_available:
+        st.subheader(f"📈 销售趋势（按{period_label}汇总）")
+    else:
+        st.subheader("📈 销售趋势")
 
     if len(monthly) > 0 and all(c in monthly.columns for c in ["period", "gmv", "orders"]):
         monthly_plot = monthly.copy()
@@ -940,19 +978,23 @@ with tab_overview:
         )
         st.altair_chart(orders_chart, width="stretch")
     else:
-        st.info("ℹ️ 暂无销售趋势数据。")
+        if time_dimension_available:
+            st.info("ℹ️ 暂无销售趋势数据。")
+        else:
+            st.info("ℹ️ 原数据未提供订单时间，已跳过趋势图和GMV环比；其他分析不受影响。")
 
-    st.subheader(f"{period_label}度数据明细")
-    monthly_display = monthly.copy()
-    if "gmv" in monthly_display.columns:
-        monthly_display["gmv"] = monthly_display["gmv"].apply(money_fmt)
-    monthly_display = monthly_display.rename(columns={
-        "period": "时间",
-        "orders": "订单数",
-        "gmv": "销售额 GMV",
-        "users": "用户数",
-    })
-    st.dataframe(monthly_display, width="stretch", hide_index=True)
+    if time_dimension_available:
+        st.subheader(f"{period_label}度数据明细")
+        monthly_display = monthly.copy()
+        if "gmv" in monthly_display.columns:
+            monthly_display["gmv"] = monthly_display["gmv"].apply(money_fmt)
+        monthly_display = monthly_display.rename(columns={
+            "period": "时间",
+            "orders": "订单数",
+            "gmv": "销售额 GMV",
+            "users": "用户数",
+        })
+        st.dataframe(monthly_display, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.subheader("订单状态分布")
