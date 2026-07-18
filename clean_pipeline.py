@@ -1,204 +1,204 @@
-"""
-清洗 Pipeline 封装
-用于 app.py 上传链路：处理缺失值、重复订单、日期、金额、数量、异常订单等。
-重点：对脏 Excel 中的金额字符串（¥7,999、7999元、-99、空值）做强制数值化，避免比较时报错。
-"""
-import pandas as pd
+"""订单清洗 Pipeline：保留原始业务含义，只修复能够安全确定的问题。"""
+
+from __future__ import annotations
+
 import numpy as np
+import pandas as pd
+
+from order_schema import (
+    normalize_status_series,
+    parse_datetime_series,
+    parse_number_series,
+)
 
 
 def _coalesce_duplicate_columns(df):
-    """合并重复列名，避免 df['col'] 返回 DataFrame。"""
-    if df is None or df.empty:
-        return df
-    if df.columns.is_unique:
+    """同名列按从左到右取每行第一个非空值。"""
+    if df is None or df.empty or df.columns.is_unique:
         return df
     out = pd.DataFrame(index=df.index)
     for name in pd.unique(df.columns):
-        cols = df.loc[:, df.columns == name]
-        if cols.shape[1] == 1:
-            out[name] = cols.iloc[:, 0]
-        else:
-            out[name] = cols.bfill(axis=1).iloc[:, 0]
+        columns = df.loc[:, df.columns == name]
+        out[name] = columns.iloc[:, 0] if columns.shape[1] == 1 else columns.bfill(axis=1).iloc[:, 0]
     return out
 
 
-def _series(df, col):
-    """安全取列：即使有重复列名，也返回一维 Series。"""
-    obj = df[col]
-    if isinstance(obj, pd.DataFrame):
-        return obj.bfill(axis=1).iloc[:, 0]
-    return obj
-
-
-def _to_number(series, default=0.0):
-    """把金额/数量字段强制转为数字：支持 ¥、￥、逗号、中文单位、空值等。"""
-    if series is None:
-        return series
-    s = series.copy()
-    if s.dtype == object:
-        s = (
-            s.astype(str)
-            .str.strip()
-            .str.replace('，', ',', regex=False)
-            .str.replace(',', '', regex=False)
-            .str.replace('￥', '', regex=False)
-            .str.replace('¥', '', regex=False)
-            .str.replace('元', '', regex=False)
-            .str.replace('件', '', regex=False)
-            .str.replace(r'[^0-9\.\-]', '', regex=True)
-        )
-        s = s.replace({'': np.nan, 'nan': np.nan, 'None': np.nan})
-    return pd.to_numeric(s, errors='coerce').fillna(default)
+def _blank_mask(series):
+    return series.isna() | series.astype(str).str.strip().str.lower().isin(
+        {"", "nan", "none", "null", "unknown", "未知"}
+    )
 
 
 def clean_pipeline(df_orders, df_products=None, df_users=None, anomaly_threshold=None):
     """
-    对上传的订单数据执行清洗，返回 (清洗后DataFrame, 清洗报告list)。
-    anomaly_threshold: 可选，每行订单 quantity 超过此值则标记异常；
-                       若不传，则动态计算为 mean + 3 * std（最低 10）。
+    清洗单 Sheet 订单数据，返回 ``(清洗后数据, 清洗报告)``。
+
+    原则：
+    - 可确定的格式问题自动修复；
+    - 负数、零值等可能具有业务含义的数据只标记，不擅自取绝对值；
+    - 0 元订单保留，只有真正缺失的金额才尝试用数量×单价补齐。
     """
+    if df_orders is None:
+        return pd.DataFrame(), ["未读取到订单数据"]
+
     df = _coalesce_duplicate_columns(df_orders.copy())
     report = []
 
-    # 0. 先强制数值化，避免 'str' 和 int 比较时报错
-    numeric_defaults = {
-        'quantity': 1,
-        'unit_price': 0.0,
-        'total_amount': 0.0,
-        'is_anomaly': 0,
-    }
-    for col, default in numeric_defaults.items():
-        if col in df.columns:
-            raw_col = _series(df, col)
-            before_na = int(raw_col.isna().sum())
-            df[col] = _to_number(raw_col, default=default)
-            after_zero_or_default = int((df[col] == default).sum()) if col != 'is_anomaly' else 0
-            if before_na > 0:
-                report.append(f"{col} 存在空值 {before_na} 条 → 已按默认值处理")
+    # 1. 数值字段解析
+    for column in ["quantity", "unit_price", "total_amount"]:
+        if column not in df.columns:
+            continue
+        before_valid = int(df[column].notna().sum())
+        df[column] = parse_number_series(df[column])
+        invalid = max(before_valid - int(df[column].notna().sum()), 0)
+        if invalid:
+            report.append(f"{column} 有 {invalid} 条无法解析，已保留为空值并标记检查")
 
-    # 1. 计算动态异常阈值
+    if "quantity" not in df.columns:
+        df["quantity"] = 1.0
+        report.append("缺少 quantity → 默认每行数量为 1")
+    else:
+        missing_quantity = int(df["quantity"].isna().sum())
+        if missing_quantity:
+            df["quantity"] = df["quantity"].fillna(1.0)
+            report.append(f"quantity 缺失 {missing_quantity} 条 → 默认数量为 1")
+
+    if "is_anomaly" in df.columns:
+        df["is_anomaly"] = parse_number_series(df["is_anomaly"]).fillna(0)
+    else:
+        df["is_anomaly"] = 0
+
+    # 2. 状态保留原值，同时生成统一分析状态
+    if "status" in df.columns:
+        df["status"] = df["status"].where(df["status"].notna(), "未知").astype(str).str.strip()
+        df["status_norm"] = normalize_status_series(df["status"])
+        unknown_count = int((df["status_norm"] == "unknown").sum())
+        if unknown_count:
+            report.append(f"订单状态有 {unknown_count} 条未识别，可在分析页决定是否纳入")
+    else:
+        df["status"] = "未提供状态"
+        df["status_norm"] = "completed"
+
+    # 3. 安全的缺失值处理
+    if "payment_method" in df.columns:
+        missing = int(_blank_mask(df["payment_method"]).sum())
+        if missing:
+            df.loc[_blank_mask(df["payment_method"]), "payment_method"] = "未知"
+            report.append(f"payment_method 缺失 {missing} 条 → 填充“未知”")
+
+    if "city" in df.columns:
+        missing_city = _blank_mask(df["city"])
+        missing_count = int(missing_city.sum())
+        if (
+            missing_count and df_users is not None and not df_users.empty
+            and {"user_id", "city"}.issubset(df_users.columns) and "user_id" in df.columns
+        ):
+            user_city = (
+                df_users.dropna(subset=["user_id"]).drop_duplicates("user_id")
+                .set_index("user_id")["city"]
+            )
+            df.loc[missing_city, "city"] = df.loc[missing_city, "user_id"].map(user_city)
+            report.append(f"city 缺失 {missing_count} 条 → 已尝试用本次提供的用户表补充")
+        df.loc[_blank_mask(df["city"]), "city"] = "未知"
+
+    # 4. 只删除完全相同的重复明细，不误删同一订单中的合法商品行
+    duplicate_subset = [c for c in df.columns if c not in {"is_anomaly", "status_norm"}]
+    duplicate_mask = df.duplicated(subset=duplicate_subset, keep="first") if duplicate_subset else pd.Series(False, index=df.index)
+    duplicate_count = int(duplicate_mask.sum())
+    if duplicate_count:
+        df = df.loc[~duplicate_mask].copy()
+        report.append(f"完全重复的订单明细 {duplicate_count} 条 → 已删除")
+
+    # 5. 日期格式统一
+    if "order_date" in df.columns:
+        df["order_date"] = parse_datetime_series(df["order_date"])
+        invalid_date = int(df["order_date"].isna().sum())
+        if invalid_date:
+            df = df.loc[df["order_date"].notna()].copy()
+            report.append(f"无效订单时间 {invalid_date} 条 → 已从分析数据中排除")
+
+    # 6. 仅在价格真正缺失时，尝试使用本次提供的商品表补充
+    if "unit_price" not in df.columns:
+        df["unit_price"] = np.nan
+    missing_price = df["unit_price"].isna()
+    if (
+        missing_price.any() and df_products is not None and not df_products.empty
+        and {"product_id", "price"}.issubset(df_products.columns) and "product_id" in df.columns
+    ):
+        product_price = (
+            df_products.dropna(subset=["product_id"]).drop_duplicates("product_id")
+            .set_index("product_id")["price"].apply(lambda value: parse_number_series(pd.Series([value])).iloc[0])
+        )
+        df.loc[missing_price, "unit_price"] = df.loc[missing_price, "product_id"].map(product_price)
+        filled = int((missing_price & df["unit_price"].notna()).sum())
+        if filled:
+            report.append(f"unit_price 缺失值中有 {filled} 条通过商品表补充")
+
+    # 7. 金额只补空值，合法的0元订单不改写
+    if "total_amount" not in df.columns:
+        df["total_amount"] = df["quantity"] * df["unit_price"]
+        report.append("缺少 total_amount → 已按 quantity × unit_price 计算")
+    else:
+        missing_amount = df["total_amount"].isna()
+        computable = missing_amount & df["quantity"].notna() & df["unit_price"].notna()
+        if computable.any():
+            df.loc[computable, "total_amount"] = df.loc[computable, "quantity"] * df.loc[computable, "unit_price"]
+            report.append(f"total_amount 缺失值中有 {int(computable.sum())} 条按 quantity × unit_price 补齐")
+
+    unresolved_amount = int(df["total_amount"].isna().sum())
+    if unresolved_amount:
+        df.loc[df["total_amount"].isna(), "is_anomaly"] = 1
+        df["total_amount"] = df["total_amount"].fillna(0)
+        report.append(f"仍有 {unresolved_amount} 条金额无法计算 → 金额暂记0并标记异常")
+
+    # 8. 补齐分析标识，但不伪装成真实业务字段
+    if "order_id" not in df.columns:
+        df["order_id"] = [f"ROW{i:07d}" for i in range(1, len(df) + 1)]
+        report.append("缺少 order_id → 已生成临时行ID，每行暂按一笔订单计算")
+    else:
+        missing_order_id = _blank_mask(df["order_id"])
+        if missing_order_id.any():
+            replacements = [f"ROW{i:07d}" for i in range(1, int(missing_order_id.sum()) + 1)]
+            df.loc[missing_order_id, "order_id"] = replacements
+            report.append(f"order_id 缺失 {int(missing_order_id.sum())} 条 → 已生成临时行ID")
+
+    distinct_orders = int(df["order_id"].nunique(dropna=True))
+    if distinct_orders < len(df):
+        report.append(
+            f"识别为订单明细表：{len(df):,} 行商品明细对应 {distinct_orders:,} 个去重订单，"
+            "订单数和客单价将按订单ID计算"
+        )
+        if "status_norm" in df.columns:
+            mixed_status_orders = int(df.groupby("order_id")["status_norm"].nunique().gt(1).sum())
+            if mixed_status_orders:
+                report.append(f"有 {mixed_status_orders} 个订单包含多种明细状态，请确认平台状态口径")
+
+    if "product_id" not in df.columns:
+        if "product_name" in df.columns:
+            df["product_id"] = df["product_name"].astype(str)
+        else:
+            df["product_id"] = "unknown_product"
+    elif "product_name" in df.columns:
+        missing_product_id = _blank_mask(df["product_id"])
+        df.loc[missing_product_id, "product_id"] = df.loc[missing_product_id, "product_name"].astype(str)
+
+    # 9. 异常只标记，不擅自修改业务值
     if anomaly_threshold is None:
-        if len(df) > 0 and 'quantity' in df.columns:
-            q_mean = df['quantity'].mean()
-            q_std = df['quantity'].std()
-            if pd.notna(q_std) and q_std > 0:
-                computed = round(q_mean + 3 * q_std)
-                anomaly_threshold = max(computed, 10)
-            else:
-                anomaly_threshold = 20
+        positive_quantity = df.loc[df["quantity"] > 0, "quantity"]
+        if len(positive_quantity) >= 2 and positive_quantity.std() > 0:
+            anomaly_threshold = max(round(positive_quantity.mean() + 3 * positive_quantity.std()), 10)
         else:
             anomaly_threshold = 20
 
-    # 2. 标准化 status 列
-    if 'status' in df.columns:
-        df['status'] = (
-            df['status'].astype(str)
-            .str.strip()
-            .str.replace('：', ':', regex=False)
-            .str.replace(' ', '', regex=False)
-            .str.lower()
+    abnormal_quantity = (df["quantity"] <= 0) | (df["quantity"] > anomaly_threshold)
+    abnormal_price = df["unit_price"].notna() & (df["unit_price"] < 0)
+    abnormal_amount = df["total_amount"] < 0
+    anomaly_mask = abnormal_quantity | abnormal_price | abnormal_amount
+    if anomaly_mask.any():
+        df.loc[anomaly_mask, "is_anomaly"] = 1
+        report.append(
+            f"业务异常值 {int(anomaly_mask.sum())} 条 → 已标记，未自动改变正负号或删除"
         )
 
-        done_variants = {'已完成', '完成', 'paid', 'completed', 'success', '已支付', '交易完成', '成功'}
-        cancel_variants = {'已取消', '取消', 'cancelled', 'canceled', 'cancel'}
-        refund_variants = {'退款', '已退款', '退款中', 'refunded', 'refund'}
-
-        done_count = int(df['status'].isin(done_variants).sum())
-        cancel_count = int(df['status'].isin(cancel_variants).sum())
-        refund_count = int(df['status'].isin(refund_variants).sum())
-
-        df.loc[df['status'].isin(done_variants), 'status'] = '已完成'
-        df.loc[df['status'].isin(cancel_variants), 'status'] = '已取消'
-        df.loc[df['status'].isin(refund_variants), 'status'] = '退款中'
-
-        if done_count > 0:
-            report.append(f"status 列标准化：{done_count} 条记录统一为'已完成'")
-        if cancel_count > 0 or refund_count > 0:
-            report.append(f"status 列识别取消/退款订单：{cancel_count + refund_count} 条")
-
-    # 3. 缺失值
-    if 'payment_method' in df.columns and df['payment_method'].isna().sum() > 0:
-        n = int(df['payment_method'].isna().sum())
-        df['payment_method'] = df['payment_method'].fillna('未知')
-        report.append(f"payment_method 缺失 {n} 条 → 填充'未知'")
-
-    if 'city' in df.columns and df['city'].isna().sum() > 0:
-        n = int(df['city'].isna().sum())
-        if df_users is not None and not df_users.empty and 'user_id' in df.columns and 'user_id' in df_users.columns and 'city' in df_users.columns:
-            user_city_map = df_users.set_index('user_id')['city'].to_dict()
-            na_mask = df['city'].isna()
-            df.loc[na_mask, 'city'] = df.loc[na_mask, 'user_id'].map(user_city_map)
-            report.append(f"city 缺失 {n} 条 → 尝试通过用户表关联补充")
-        df['city'] = df['city'].fillna('未知')
-
-    # 4. 重复订单
-    dedup_cols = [c for c in ['order_id', 'user_id', 'product_id', 'order_date', 'quantity'] if c in df.columns]
-    if dedup_cols:
-        before = len(df)
-        df = df.drop_duplicates(subset=dedup_cols, keep='first').copy()
-        removed = before - len(df)
-        if removed > 0:
-            report.append(f"重复订单 {removed} 条 → 已删除")
-
-    # 5. 时间格式统一
-    if 'order_date' in df.columns:
-        def normalize_datetime(x):
-            if pd.isna(x):
-                return x
-            x = str(x).strip().replace('：', ':').replace('/', '-')
-            return x
-
-        df['order_date'] = df['order_date'].apply(normalize_datetime)
-        df['order_date'] = pd.to_datetime(df['order_date'], errors='coerce')
-        invalid = int(df['order_date'].isna().sum())
-        if invalid > 0:
-            df = df[df['order_date'].notna()].copy()
-            report.append(f"无效日期 {invalid} 条 → 已删除")
-
-    # 6. 异常价格
-    if 'unit_price' in df.columns:
-        negative = int((df['unit_price'] < 0).sum())
-        if negative > 0:
-            df['unit_price'] = df['unit_price'].abs()
-            report.append(f"负数价格 {negative} 条 → 取绝对值")
-
-        zero_mask = df['unit_price'] == 0
-        zero = int(zero_mask.sum())
-        if zero > 0 and df_products is not None and not df_products.empty and 'product_id' in df.columns and 'product_id' in df_products.columns and 'price' in df_products.columns:
-            price_map = df_products.set_index('product_id')['price'].to_dict()
-            for idx in df[zero_mask].index:
-                pid = df.loc[idx, 'product_id']
-                if pid in price_map:
-                    df.loc[idx, 'unit_price'] = price_map[pid]
-            report.append(f"零价格 {zero} 条 → 尝试用商品原价填充")
-
-    # 7. 重新计算/补齐 total_amount
-    if 'quantity' in df.columns and 'unit_price' in df.columns:
-        # 如果 total_amount 不存在或全为 0，使用 quantity * unit_price；否则保留上传表里的实付金额/营业收入
-        if 'total_amount' not in df.columns:
-            df['total_amount'] = df['quantity'] * df['unit_price']
-            report.append("total_amount 缺失 → 已按 quantity × unit_price 计算")
-        else:
-            zero_or_missing = df['total_amount'].isna() | (df['total_amount'] == 0)
-            if zero_or_missing.any():
-                df.loc[zero_or_missing, 'total_amount'] = df.loc[zero_or_missing, 'quantity'] * df.loc[zero_or_missing, 'unit_price']
-                report.append(f"total_amount 空值/零值 {int(zero_or_missing.sum())} 条 → 已按 quantity × unit_price 补齐")
-
-        large_mask = df['quantity'] > anomaly_threshold
-        large_qty = int(large_mask.sum())
-        if 'is_anomaly' not in df.columns:
-            df['is_anomaly'] = 0
-        if large_qty > 0:
-            df.loc[large_mask, 'is_anomaly'] = 1
-            report.append(f"超大数量(>{anomaly_threshold}) {large_qty} 条 → 标记 is_anomaly=1")
-
-    # 8. 空 product_id
-    if 'product_id' in df.columns:
-        missing_mask = df['product_id'].isna() | (df['product_id'].astype(str).str.strip() == '')
-        missing_pid = int(missing_mask.sum())
-        if missing_pid > 0:
-            df = df[~missing_mask].copy()
-            report.append(f"空 product_id {missing_pid} 条 → 已删除")
-
-    return df, report
+    df["is_anomaly"] = df["is_anomaly"].fillna(0).astype(int)
+    return df.reset_index(drop=True), report

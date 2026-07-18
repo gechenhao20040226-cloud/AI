@@ -1,222 +1,139 @@
-# AI 电商分析助手
+# AI 电商数据分析助手
 
-一个基于 **Streamlit + DuckDB + Plotly + GLM-4-Flash** 的电商数据分析 Dashboard。  
-项目支持上传 CSV / Excel 订单数据，自动完成数据清洗、SQL 指标分析、异常检测、可视化展示，并生成 AI 商业洞察报告。
+一个基于 **Streamlit + Pandas + DuckDB + Altair + GLM-4-Flash** 的订单数据分析工具。
 
----
+用户上传单个 CSV 或 Excel 文件后，系统会自动定位表头、识别业务字段，并让用户确认字段对应关系，再执行数据清洗、经营指标计算、异常检测和 AI 商业分析。
 
-## 项目亮点
+## 核心能力
 
-* 支持 CSV / Excel 文件上传
-* 自动识别常见中文/英文电商字段
-* 清洗脏数据，包括金额、日期、重复订单、异常数量等
-* 使用 DuckDB 执行本地 SQL 分析
-* 使用 Plotly 生成交互式图表
-* 支持销售趋势、Top 商品、品类分布、用户消费行为分析
-* 支持异常订单检测
-* 接入 GLM-4-Flash 自动生成商业洞察报告
-* 支持 商业分析报告下载
+- 支持 CSV、XLSX、XLS，Excel 仅读取第一个 Sheet
+- CSV 自动尝试 UTF-8、GB18030、GBK、Big5 等常见编码
+- 自动识别文件中的真实表头行，兼容顶部带报表标题或说明的文件
+- 覆盖订单号、买家 UID、SKU 编码、支付时间、订单实收金额等常见业务字段
+- 自动识别后提供字段确认页面，用户可通过下拉框纠正映射
+- 兼容人民币符号、千分位、`1.2万`、Excel 日期序列和时间戳
+- 统一识别完成、退款、取消、处理中、失败和未知状态
+- 允许用户自行选择哪些订单状态参与 GMV 分析
+- 自动判断一笔订单包含多行商品明细，订单数统一按订单 ID 去重
+- 使用 DuckDB 执行本地 SQL 分析
+- 使用 Altair 生成交互式图表
+- 支持异常订单识别与 GLM-4-Flash 商业报告生成
 
----
+## 数据导入流程
 
-## 技术栈
+1. 上传一个 CSV 或 Excel 文件。
+2. 系统读取 CSV 或 Excel 的第一个 Sheet，并自动定位表头。
+3. 页面展示原始数据前 10 行。
+4. 系统给出字段匹配建议，用户重点确认：
+   - 订单 ID
+   - 订单时间或支付时间
+   - 实付金额
+   - 订单状态
+5. 确认后执行数据校验和清洗。
+6. 用户选择参与分析的订单状态，再查看 Dashboard。
 
-|模块|技术|
-|-|-|
-|前端展示|Streamlit|
-|数据处理|Pandas / NumPy|
-|SQL 分析|DuckDB|
-|数据可视化|Plotly|
-|商业分析报告|GLM-4-Flash API|
-|API 调用方式|OpenAI SDK Compatible API|
+这种方式避免完全依赖固定字段名或 AI 猜测。即使是新的业务后台导出格式，也可以通过一次人工确认完成分析。
 
----
+## 支持的标准字段
+
+|标准字段|业务含义|是否关键|
+|---|---|---|
+|`order_id`|订单号或交易号|建议提供|
+|`order_date`|下单、支付或成交时间|必须|
+|`total_amount`|实付金额、订单实收或 GMV|必须，或同时提供数量和单价|
+|`status`|订单状态|建议提供|
+|`user_id`|用户、买家或会员 ID|用户分析需要|
+|`product_id`|商品、SKU 或货品 ID|商品分析建议提供|
+|`product_name`|商品名称或商品标题|商品分析建议提供|
+|`quantity`|购买数量或成交件数|可选，默认 1|
+|`unit_price`|商品单价|可选|
+|`payment_method`|支付方式|可选|
+|`city`|城市或地区|可选|
+|`category`|品类或类目|可选|
+|`user_level`|用户或会员等级|可选|
+
+## 关键统计口径
+
+- **订单数**：`COUNT(DISTINCT order_id)`
+- **GMV**：所选有效状态下的 `SUM(total_amount)`
+- **客单价**：GMV ÷ 去重订单数
+- **用户数**：`COUNT(DISTINCT user_id)`
+- **复购用户**：去重订单数大于等于 2 的用户
+- **商品销量**：`SUM(quantity)`
+
+如果原文件没有订单 ID，系统会生成临时行 ID，并明确提示“每行暂按一笔订单计算”。
+
+## 数据清洗原则
+
+- 只自动修复能够安全确定的格式问题
+- 负价格、负金额、异常数量只标记，不擅自取绝对值
+- 合法的 0 元订单不会被自动改写
+- 只有金额为空时，才尝试用“数量 × 单价”补齐
+- 只删除完全相同的重复明细，不删除同一订单中的不同商品行
+- 无法解析的日期会从分析数据中排除，并展示数量
+- 上传自定义订单时不会关联项目自带的模拟商品表或用户表
 
 ## 项目结构
 
 ```text
 AI-Ecommerce-Analytics-Assistant/
-├── app.py                 # Streamlit Dashboard 主程序
-├── clean_pipeline.py      # 数据清洗 Pipeline
-├── requirements.txt       # Python 依赖
-├── README.md              # 项目说明文档
-├── orders_cleaned.csv     # 示例订单数据
-├── products.csv           # 示例商品数据
-├── users.csv              # 示例用户数据
-└── .gitignore             # Git 忽略配置
+├── app.py                         # Streamlit 主程序
+├── order_schema.py                # 文件读取、表头定位、字段与状态识别
+├── clean_pipeline.py              # 数据清洗 Pipeline
+├── requirements.txt               # Python 依赖
+├── README.md                      # 项目说明
+├── orders_cleaned.csv             # 模拟订单明细
+├── products.csv                   # 模拟商品数据
+├── users.csv                      # 模拟用户数据
+├── .gitignore
+└── .streamlit/
+    └── secrets.toml.example       # 密钥配置示例
 ```
 
----
-
-## 快速开始
-
-### 1. 克隆项目
-
-```bash
-git clone <your-repo-url>
-cd AI-Ecommerce-Analytics-Assistant
-```
-
-### 2. 安装依赖
+## 本地运行
 
 ```bash
 pip install -r requirements.txt
+streamlit run app.py
 ```
 
-### 3. 配置 API Key
+## 配置 GLM API
 
-本项目使用智谱 GLM API 生成 AI 商业洞察。
+复制示例配置：
 
-你可以选择以下任意一种方式配置 `ZHIPU_API_KEY`。
+```text
+.streamlit/secrets.toml.example
+```
 
-#### 方式一：使用 Streamlit secrets
-
-在项目根目录创建：
+并重命名为：
 
 ```text
 .streamlit/secrets.toml
 ```
 
-写入：
+填写：
 
 ```toml
 ZHIPU_API_KEY = "your_api_key_here"
 ```
 
-#### 方式二：使用环境变量
+也可以使用环境变量 `ZHIPU_API_KEY`。真实密钥不能提交到 GitHub。
 
-Windows PowerShell:
-
-```powershell
-$env:ZHIPU_API_KEY="your_api_key_here"
-```
-
-macOS / Linux:
-
-```bash
-export ZHIPU_API_KEY="your_api_key_here"
-```
-
-> 注意：不要将真实 API Key 上传到 GitHub。
-
-### 4. 启动项目
-
-```bash
-streamlit run app.py
-```
-
-启动后，在浏览器中打开 Streamlit 显示的本地地址即可使用。
-
----
-
-## 功能说明
-
-### 数据上传
-
-用户可以上传 CSV / Excel 格式的订单数据。系统会自动进行字段识别与标准化，兼容常见字段名，例如：
-
-* 订单号 / order_id
-* 用户ID / user_id
-* 商品ID / product_id
-* 商品名称 / product_name
-* 订单日期 / order_date
-* 数量 / quantity
-* 单价 / unit_price
-* 总金额 / total_amount
-* 订单状态 / status
-* 城市 / city
-* 品类 / category
-
----
-
-### 数据清洗
-
-`clean_pipeline.py` 会对上传数据进行自动清洗，包括：
-
-* 合并重复列名
-* 金额字段数值化，例如 `¥7,999`、`7999元`
-* 数量字段数值化
-* 订单状态标准化
-* 缺失支付方式填充
-* 缺失城市字段补充
-* 重复订单删除
-* 日期格式统一
-* 负数价格修正
-* `total_amount` 自动补齐
-* 超大数量订单标记为异常
-* 空商品字段过滤
-
----
-
-### SQL 指标分析
-
-项目使用 DuckDB 在内存中执行 SQL 分析，核心指标包括：
-
-* 总订单数
-* 总用户数
-* 总 GMV
-* 客单价
-* GMV 环比
-* 销售趋势
-* Top 商品
-* 品类销售分布
-* 用户消费排行
-* 订单状态分布
-* 异常订单检测
-
----
-
-### 可视化 Dashboard
-
-系统使用 Plotly 展示图表，包括：
-
-* 销售趋势图
-* Top 商品销售额排行
-* 品类销售额占比
-* 各品类 GMV 对比
-* 用户消费金额 Top 10
-* 用户订单数分布
-
-图表右上角保留 PNG 下载按钮，便于保存分析结果。
-
----
-
-### 商业分析
-
-项目接入 GLM-4-Flash，根据 SQL 分析结果自动生成中文商业分析报告，包括：
-
-* 核心销售结论
-* Top 商品与品类表现
-* 异常订单与数据质量提醒
-* 用户分析
-* 下一步经营建议
-
-系统会尽量避免 AI 基于缺失字段或默认值生成误导性结论。
-
----
+未配置 API Key 时，订单上传、字段识别、数据清洗和 Dashboard 均可正常使用，仅无法生成 AI 商业报告。
 
 ## 注意事项
 
-1. 本项目示例数据为模拟数据，不包含真实用户隐私。
-2. 上传真实业务数据前，请先进行脱敏处理。
-3. AI 报告仅作为辅助分析参考，不能替代人工业务判断。
-4. 请勿将 `.streamlit/secrets.toml`、`.env` 或任何真实 API Key 提交到 GitHub。
-
----
+1. Excel 文件只读取第一个 Sheet。
+2. 上传真实业务数据前，建议删除姓名、手机号、地址等非分析必需字段。
+3. 点击生成 AI 报告时，汇总后的分析结果会发送给 GLM API；原始完整订单不会被发送。
+4. AI 报告仅用于辅助判断，不能替代财务或经营口径确认。
+5. 示例数据为模拟数据，不包含真实用户隐私。
 
 ## 后续可扩展方向
 
-* 增加多 Sheet Excel 自动识别
-* 增加用户留存 / 复购分析
-* 增加 RFM 用户分层
-* 增加退款率、取消率分析
-* 增加自动生成 PDF 报告
-* 增加数据库连接能力
-* 增加部署到 Streamlit Cloud 的在线 Demo
+- 保存不同业务后台的字段模板
+- 增加退款金额、净 GMV 和售后分析
+- 增加 RFM 用户分层与留存分析
+- 支持大文件分块读取
+- 增加自动化单元测试和字段识别测试集
 
----
-
-## 项目说明
-
-该项目主要用于展示数据清洗、SQL 分析、可视化 Dashboard 和 AI 分析的完整流程。  
-开发过程中使用了 AI 工具辅助代码生成与调试，但项目结构设计、业务逻辑整合、数据处理规则和最终功能实现由本人完成。

@@ -13,7 +13,6 @@ API Key：
 
 import os
 import sys
-import re
 import json
 from datetime import datetime
 
@@ -26,6 +25,14 @@ from openai import OpenAI
 # 导入清洗 Pipeline
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from clean_pipeline import clean_pipeline
+from order_schema import (
+    STANDARD_FIELDS,
+    apply_column_mapping,
+    normalize_status_series,
+    read_single_sheet_order_file,
+    suggest_column_mapping,
+    validate_mapped_orders,
+)
 
 
 # =========================
@@ -103,36 +110,10 @@ def coalesce_duplicate_columns(df):
 
 
 def standardize_status(series):
-    """统一订单状态字段为标准值：completed, cancelled, refunded, pending, failed, unknown。"""
+    """统一订单状态字段为标准值。"""
     if series is None or series.empty:
         return pd.Series([], dtype=str)
-
-    completed_aliases = {
-        "已完成", "完成", "成功", "交易成功", "支付成功", "已支付",
-        "paid", "completed", "complete", "finished", "success", "succeeded"
-    }
-    cancelled_aliases = {"取消", "已取消", "已关闭", "关闭", "cancelled", "canceled", "closed"}
-    refunded_aliases = {"退款", "已退款", "退货退款", "refunded", "refund"}
-    pending_aliases = {"待支付", "待付款", "pending", "未支付", "未付款", "unpaid"}
-    failed_aliases = {"失败", "支付失败", "failed", "fail"}
-
-    def norm(val):
-        if pd.isna(val):
-            return "unknown"
-        s = str(val).strip().lower()
-        if s in {a.lower() for a in refunded_aliases}:
-            return "refunded"
-        if s in {a.lower() for a in cancelled_aliases}:
-            return "cancelled"
-        if s in {a.lower() for a in pending_aliases}:
-            return "pending"
-        if s in {a.lower() for a in failed_aliases}:
-            return "failed"
-        if s in {a.lower() for a in completed_aliases}:
-            return "completed"
-        return "unknown"
-
-    return series.apply(norm)
+    return normalize_status_series(series)
 
 
 
@@ -149,20 +130,6 @@ def load_default_data():
         return df_orders, df_products, df_users
     except FileNotFoundError:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-
-def load_uploaded_file(uploaded_file):
-    """加载用户上传的 CSV / Excel 文件。"""
-    if uploaded_file is None:
-        return None
-    try:
-        filename = uploaded_file.name.lower()
-        if filename.endswith(".csv"):
-            return pd.read_csv(uploaded_file)
-        return pd.read_excel(uploaded_file)
-    except Exception as e:
-        st.error(f"❌ 文件解析失败：{e}")
-        return None
 
 
 def register_data(df_orders, df_products, df_users):
@@ -206,181 +173,6 @@ def register_data(df_orders, df_products, df_users):
 # =========================
 # 上传数据预处理
 # =========================
-def basic_rule_column_mapping(df):
-    """基于规则的中文/常见字段名兜底映射。尽量避免多个原始列映射到同一标准列。"""
-    mapping = {}
-    used_targets = set()
-
-    def add(col, target, replace=False):
-        if col in mapping:
-            return
-        if target in used_targets and not replace:
-            return
-        mapping[col] = target
-        used_targets.add(target)
-
-    # 第一轮：优先级最高的明确字段
-    for col in df.columns:
-        c = str(col).strip().lower()
-        if ("订单" in c and ("号" in c or "id" in c)) or "order id" in c:
-            add(col, "order_id")
-        elif ("商品" in c and ("id" in c or "编号" in c)) or "product id" in c:
-            add(col, "product_id")
-        elif c in ["商品名", "商品名称", "产品名", "产品名称", "sku名称"] or "product name" in c:
-            add(col, "product_name")
-        elif "实付" in c or "实际到账" in c or "actual pay" in c or "actual amount" in c:
-            add(col, "total_amount")
-        elif "交易日期" in c or "订单日期" in c or "下单日期" in c or "trade date" in c or "order date" in c:
-            add(col, "order_date")
-        elif "支付方式" in c or "付款方式" in c or "payment_method" in c or "payment method" in c:
-            add(col, "payment_method")
-        elif "客户编号" in c or "客户id" in c or "用户id" in c or "user id" in c or "customer id" in c:
-            add(col, "user_id")
-        elif "客户姓名" in c or "客户名" in c or "用户名" in c or "customer name" in c:
-            # 没有客户编号时，用客户姓名作为用户标识，方便做聚合；不等同于真实 ID
-            add(col, "user_id")
-
-    # 第二轮：普通字段，只有目标列尚未存在时才映射
-    for col in df.columns:
-        if col in mapping:
-            continue
-        c = str(col).strip().lower()
-        if "数量" in c or "件数" in c or "销量" in c or "qty" in c or c == "quantity":
-            add(col, "quantity")
-        elif "单价" in c or "unit price" in c or c == "price" or "售价" in c:
-            add(col, "unit_price")
-        elif "营业收入" in c or "销售额" in c or "gmv" in c or "总价" in c or "金额" in c or "实付金额" in c or "支付金额" in c or "订单金额" in c or "成交金额" in c:
-            add(col, "total_amount")
-        elif "日期" in c or "下单" in c:
-            # 避免把“支付时间”误识别成订单日期
-            if "支付" not in c and "付款" not in c:
-                add(col, "order_date")
-        elif "状态" in c or "status" in c or "交易状态" in c or "支付状态" in c or "订单状态" in c:
-            add(col, "status")
-        elif "城市" in c or "地区" in c or "所在城市" in c:
-            add(col, "city")
-        elif "品类" in c or "分类" in c or "类目" in c or "category" in c or "商品分类" in c:
-            add(col, "category")
-        elif "用户等级" in c or "会员等级" in c or "客户等级" in c or "会员级别" in c or "用户级别" in c:
-            add(col, "user_level")
-
-    if mapping:
-        df = df.rename(columns=mapping)
-    return coalesce_duplicate_columns(df)
-
-def smart_column_mapping(df):
-    """使用规则 + GLM 识别上传数据表头。没有 API Key 时只使用规则映射。"""
-    df = coalesce_duplicate_columns(basic_rule_column_mapping(df))
-
-    standard_columns = [
-        "order_id", "user_id", "product_id", "product_name", "order_date",
-        "quantity", "unit_price", "total_amount", "payment_method", "status",
-        "city", "category", "user_level"
-    ]
-
-    api_key = get_zhipu_api_key()
-    if not api_key:
-        st.warning("⚠️ 未找到 ZHIPU_API_KEY，已跳过 AI 表头识别，仅使用规则映射。")
-        return df
-
-    try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://open.bigmodel.cn/api/paas/v4/"
-        )
-
-        columns_list = df.columns.tolist()
-        sample_data = df.head(3).to_json(orient="records", force_ascii=False)
-
-        prompt = f"""你是一个数据工程专家。用户上传的电商订单数据中包含以下列名：
-{json.dumps(columns_list, ensure_ascii=False)}
-
-数据样本（前3行）：
-{sample_data}
-
-请将上述列名映射到以下标准列名，只输出能确认的映射关系：
-{json.dumps(standard_columns, ensure_ascii=False)}
-
-要求：
-1. 基于列名语义和样本数据判断。
-2. 无法确认的列不要输出。
-3. 严格只输出 JSON，不要输出解释。
-4. 不要把两个不同的原始列映射到同一个标准列。
-
-输出格式：
-{{"mapping": {{"原列名1": "标准列名1", "原列名2": "标准列名2"}}}}
-"""
-
-        response = client.chat.completions.create(
-            model="glm-4-flash",
-            messages=[
-                {"role": "system", "content": "你擅长数据表字段识别和 Schema Mapping。"},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=800,
-        )
-
-        result = json.loads(response.choices[0].message.content)
-        mapping = result.get("mapping", {})
-
-        # 避免覆盖已经标准化的列；避免重复映射造成重名冲突
-        valid_mapping = {}
-        existing_standard_cols = set([c for c in df.columns if c in standard_columns])
-        used_targets = set(existing_standard_cols)
-        for raw_col, target_col in mapping.items():
-            if raw_col in df.columns and target_col in standard_columns:
-                if raw_col == target_col:
-                    continue
-                if target_col not in used_targets:
-                    valid_mapping[raw_col] = target_col
-                    used_targets.add(target_col)
-
-        if valid_mapping:
-            df = coalesce_duplicate_columns(df.rename(columns=valid_mapping))
-            st.success(
-                "✅ AI 表头识别完成：" +
-                ", ".join([f"{k} → {v}" for k, v in valid_mapping.items()])
-            )
-        else:
-            st.info("ℹ️ AI 未发现新的可确认映射，继续使用当前列名。")
-
-        return coalesce_duplicate_columns(df)
-
-    except Exception as e:
-        st.warning(f"⚠️ AI 表头识别失败：{e}。已继续使用当前列名。")
-        return df
-
-
-def parse_order_date_series(series):
-    """兼容 20260501、5月1日、2026年5月1日、2026/5/1 等格式。"""
-    current_year = datetime.now().year
-
-    def parse_one(value):
-        if pd.isna(value):
-            return value
-        s = str(value).strip()
-        s = re.sub(r"\.0$", "", s)
-
-        if re.match(r"^\d{8}$", s):
-            return f"{s[:4]}-{s[4:6]}-{s[6:]}"
-        if re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", s):
-            return s.replace("/", "-")
-
-        m1 = re.match(r"^(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*$", s)
-        if m1:
-            return f"{current_year}-{int(m1.group(1))}-{int(m1.group(2))}"
-
-        m2 = re.match(r"^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", s)
-        if m2:
-            return f"{m2.group(1)}-{int(m2.group(2))}-{int(m2.group(3))}"
-
-        return s
-
-    return pd.to_datetime(series.apply(parse_one), errors="coerce")
-
-
 def detect_missing_dimensions(upload_df):
     """判断上传数据是否缺失关键业务维度。"""
     upload_df = coalesce_duplicate_columns(upload_df)
@@ -405,15 +197,16 @@ def detect_missing_dimensions(upload_df):
     if "order_date" not in upload_df.columns:
         missing.append("order_date（时间维度）")
 
-    if "total_amount" not in upload_df.columns:
+    amount_can_be_calculated = {"quantity", "unit_price"}.issubset(upload_df.columns)
+    if "total_amount" not in upload_df.columns and not amount_can_be_calculated:
         missing.append("total_amount（金额维度）")
-    else:
+    elif "total_amount" in upload_df.columns:
         amount_series = upload_df["total_amount"]
         if amount_series.dtype == object:
             amount_series = amount_series.astype(str).str.replace(r"[^\d\.-]", "", regex=True)
         amount_numeric = pd.to_numeric(amount_series, errors="coerce")
         valid_amount_ratio = ((amount_numeric.notna()) & (amount_numeric > 0)).mean()
-        if valid_amount_ratio < 0.1:
+        if valid_amount_ratio < 0.1 and not amount_can_be_calculated:
             missing.append("total_amount（金额维度）")
 
     if "category" not in upload_df.columns:
@@ -432,7 +225,6 @@ def prepare_orders_dataframe(df_orders):
     required_defaults = {
         "is_anomaly": 0,
         "status": "completed",
-        "status_norm": "completed",
         "user_id": "unknown",
         "product_id": "unknown",
         "order_date": pd.NaT,
@@ -462,8 +254,15 @@ def prepare_orders_dataframe(df_orders):
         if "quantity" in df.columns and "unit_price" in df.columns:
             df["total_amount"] = df["quantity"] * df["unit_price"]
 
-    # 统一状态字段：必须在清洗后再次生成，避免 clean_pipeline 丢失 status_norm
-    if "status" in df.columns:
+    # 优先保留清洗 Pipeline 已生成的状态；默认示例数据再从原始状态生成。
+    allowed_statuses = {"completed", "cancelled", "refunded", "pending", "failed", "unknown"}
+    if "status_norm" in df.columns:
+        normalized = df["status_norm"].astype(str).str.strip().str.lower()
+        invalid_status = ~normalized.isin(allowed_statuses)
+        df["status_norm"] = normalized
+        if invalid_status.any() and "status" in df.columns:
+            df.loc[invalid_status, "status_norm"] = standardize_status(df.loc[invalid_status, "status"])
+    elif "status" in df.columns:
         df["status_norm"] = standardize_status(df["status"])
     else:
         df["status_norm"] = "completed"
@@ -477,15 +276,20 @@ def prepare_orders_dataframe(df_orders):
 # =========================
 # SQL 分析
 # =========================
-def get_status_condition():
-    """统一只分析 completed 订单；没有 status 的数据已在 prepare_orders_dataframe 中默认置为 completed。"""
-    return "status_norm = 'completed'", "o.status_norm = 'completed'"
+def get_status_condition(selected_statuses=None):
+    """根据页面选择生成安全的状态过滤条件。"""
+    allowed = {"completed", "cancelled", "refunded", "pending", "failed", "unknown"}
+    selected = [status for status in (selected_statuses or ["completed"]) if status in allowed]
+    if not selected:
+        return "1 = 0", "1 = 0"
+    values = ", ".join(f"'{status}'" for status in selected)
+    return f"status_norm IN ({values})", f"o.status_norm IN ({values})"
 
 
-def run_analysis(granularity="月"):
+def run_analysis(granularity="月", selected_statuses=None):
     """执行核心经营分析。"""
     results = {}
-    s_cond, o_s_cond = get_status_condition()
+    s_cond, o_s_cond = get_status_condition(selected_statuses)
 
     period_expr = (
         "SUBSTRING(CAST(order_date AS VARCHAR), 1, 7)"
@@ -495,11 +299,11 @@ def run_analysis(granularity="月"):
 
     results["summary"] = conn.execute(f"""
         SELECT
-            COUNT(*) AS total_orders,
+            COUNT(DISTINCT order_id) AS total_orders,
             COUNT(DISTINCT user_id) AS unique_users,
             COUNT(DISTINCT product_id) AS products_sold,
             SUM(total_amount) AS total_gmv,
-            AVG(total_amount) AS avg_order_value
+            SUM(total_amount) / NULLIF(COUNT(DISTINCT order_id), 0) AS avg_order_value
         FROM orders
         WHERE {s_cond}
     """).fetchdf().to_dict("records")[0]
@@ -507,7 +311,7 @@ def run_analysis(granularity="月"):
     results["monthly"] = conn.execute(f"""
         SELECT
             {period_expr} AS period,
-            COUNT(*) AS orders,
+            COUNT(DISTINCT order_id) AS orders,
             SUM(total_amount) AS gmv,
             COUNT(DISTINCT user_id) AS users
         FROM orders
@@ -534,7 +338,7 @@ def run_analysis(granularity="月"):
     results["categories"] = conn.execute(f"""
         SELECT
             COALESCE(NULLIF(CAST(o.category AS VARCHAR), ''), p.category, '未分类') AS category,
-            COUNT(*) AS orders,
+            COUNT(DISTINCT o.order_id) AS orders,
             SUM(o.total_amount) AS gmv,
             SUM(o.quantity) AS qty
         FROM orders o
@@ -552,7 +356,7 @@ def run_analysis(granularity="月"):
             user_id,
             COALESCE(NULLIF(CAST(user_level AS VARCHAR), ''), '未知') AS user_level,
             COALESCE(NULLIF(CAST(city AS VARCHAR), ''), '未知') AS city,
-            COUNT(order_id) AS order_count,
+            COUNT(DISTINCT order_id) AS order_count,
             COALESCE(SUM(total_amount), 0) AS total_spend
         FROM orders
         WHERE {s_cond}
@@ -574,7 +378,7 @@ def run_analysis(granularity="月"):
             SELECT
                 user_id,
                 COALESCE(NULLIF(CAST(user_level AS VARCHAR), ''), '未知') AS user_level,
-                COUNT(order_id) AS order_count,
+                COUNT(DISTINCT order_id) AS order_count,
                 COALESCE(SUM(total_amount), 0) AS total_spend
             FROM orders
             WHERE {s_cond}
@@ -589,8 +393,9 @@ def run_analysis(granularity="月"):
     results["order_status"] = conn.execute("""
         SELECT
             status_norm AS status,
-            COUNT(*) AS orders,
-            COUNT(*) * 100.0 / NULLIF((SELECT COUNT(*) FROM orders), 0) AS pct
+            COUNT(DISTINCT order_id) AS orders,
+            COUNT(DISTINCT order_id) * 100.0
+                / NULLIF((SELECT COUNT(DISTINCT order_id) FROM orders), 0) AS pct
         FROM orders
         GROUP BY 1
         ORDER BY orders DESC
@@ -598,18 +403,31 @@ def run_analysis(granularity="月"):
 
     results["anomalies"] = {
         "high_value_orders": conn.execute(f"""
-            SELECT *
-            FROM orders
-            WHERE total_amount > (
-                SELECT AVG(total_amount) * 3 FROM orders WHERE {s_cond}
+            WITH order_totals AS (
+                SELECT
+                    order_id,
+                    ANY_VALUE(user_id) AS user_id,
+                    MIN(order_date) AS order_date,
+                    SUM(quantity) AS quantity,
+                    SUM(total_amount) AS total_amount,
+                    STRING_AGG(DISTINCT status_norm, ', ') AS status_norm,
+                    MAX(is_anomaly) AS is_anomaly
+                FROM orders
+                WHERE {s_cond}
+                GROUP BY order_id
+            ), threshold AS (
+                SELECT AVG(total_amount) * 3 AS value FROM order_totals
             )
+            SELECT order_totals.*
+            FROM order_totals, threshold
+            WHERE order_totals.total_amount > threshold.value
             ORDER BY total_amount DESC
             LIMIT 10
         """).df().to_dict("records"),
-        "flagged_orders": conn.execute("""
-            SELECT COUNT(*) AS count
+        "flagged_orders": conn.execute(f"""
+            SELECT COUNT(DISTINCT order_id) AS count
             FROM orders
-            WHERE is_anomaly = 1
+            WHERE is_anomaly = 1 AND {s_cond}
         """).fetchdf().to_dict("records")[0],
     }
 
@@ -644,7 +462,7 @@ def get_recommended_granularity():
         return "月"
 
 
-def build_margin_df():
+def build_margin_df(selected_statuses=None):
     """当 products 表存在 cost 字段且不为全空时，计算品类毛利。"""
     try:
         columns = conn.execute("DESCRIBE products").df()["column_name"].tolist()
@@ -655,7 +473,7 @@ def build_margin_df():
         if cost_count == 0:
             return pd.DataFrame()
 
-        _, o_s_cond = get_status_condition()
+        _, o_s_cond = get_status_condition(selected_statuses)
         return conn.execute(f"""
             SELECT
                 COALESCE(NULLIF(CAST(o.category AS VARCHAR), ''), p.category, '未分类') AS category,
@@ -808,6 +626,9 @@ df_orders, df_products, df_users = load_default_data()
 
 if st.session_state.get("upload_success") and "uploaded_df" in st.session_state:
     df_orders = st.session_state["uploaded_df"]
+    # 自定义订单不能与项目自带的模拟商品/用户表混用，否则相同ID会造成错误补数。
+    df_products = pd.DataFrame()
+    df_users = pd.DataFrame()
 
 # 补全示例/上传后的订单数据
 if df_orders is not None and not df_orders.empty:
@@ -846,54 +667,86 @@ if not st.session_state.get("upload_success"):
 
         if uploaded_orders is not None:
             st.markdown(f"**已选择文件：** `{uploaded_orders.name}`")
-            if st.button("✅ 确认上传并开始分析", type="primary", use_container_width=True):
-                with st.spinner("正在解析并清洗数据..."):
-                    upload_df = load_uploaded_file(uploaded_orders)
+            try:
+                raw_upload_df, source_info = read_single_sheet_order_file(uploaded_orders)
+                suggested_mapping = suggest_column_mapping(raw_upload_df.columns)
 
-                    if upload_df is None or upload_df.empty:
-                        st.error("❌ 文件为空或解析失败，请检查后重试。")
-                    else:
-                        with st.spinner("🤖 正在识别字段并规范化数据表头..."):
-                            upload_df = smart_column_mapping(upload_df)
+                source_text = (
+                    f"已读取 {source_info['rows']:,} 行、{source_info['columns']} 列，"
+                    f"识别第 {source_info['header_row']} 行为表头"
+                )
+                if source_info.get("encoding"):
+                    source_text += f"，编码 {source_info['encoding']}"
+                st.success("✅ " + source_text)
 
-                        # 检测上传数据是否真的有 user_level 字段
-                        upload_has_user_level = "user_level" in upload_df.columns
-                        st.session_state["upload_has_user_level"] = upload_has_user_level
-                        if upload_has_user_level:
-                            st.info("ℹ️ 检测到 user_level 字段，将按用户等级进行分析。")
+                with st.expander("预览原始数据（前10行）", expanded=False):
+                    st.dataframe(raw_upload_df.head(10), width="stretch", hide_index=True)
 
-                        # 日期解析
-                        if "order_date" in upload_df.columns:
-                            upload_df["order_date"] = parse_order_date_series(upload_df["order_date"])
+                st.markdown("#### 确认字段对应关系")
+                st.caption("系统已自动选择最可能的字段。请重点确认订单时间、实付金额和订单ID；不需要的字段保持“不使用”。")
 
-                        # 商品字段兜底：有商品名但没有 product_id 时，用商品名充当 product_id
-                        if "product_id" not in upload_df.columns and "product_name" in upload_df.columns:
-                            upload_df["product_id"] = upload_df["product_name"].astype(str)
-                            st.info("ℹ️ 未检测到 product_id，已使用 product_name 作为商品标识。")
+                source_columns = [str(column) for column in raw_upload_df.columns]
+                options = ["不使用"] + source_columns
+                field_to_source = {}
 
-                        # 状态字段标准化：统一状态值，没有 status 时默认视为 completed
-                        if "status" in upload_df.columns:
-                            upload_df["status_norm"] = standardize_status(upload_df["status"])
+                with st.form("field_mapping_form"):
+                    left_col, right_col = st.columns(2)
+                    for index, (field, label) in enumerate(STANDARD_FIELDS.items()):
+                        suggested_source = suggested_mapping.get(field)
+                        default_index = options.index(suggested_source) if suggested_source in options else 0
+                        target_col = left_col if index % 2 == 0 else right_col
+                        with target_col:
+                            selected = st.selectbox(
+                                f"{label}  →  `{field}`",
+                                options=options,
+                                index=default_index,
+                                key=f"mapping_{field}_{uploaded_orders.name}",
+                            )
+                            field_to_source[field] = None if selected == "不使用" else selected
+
+                    submitted = st.form_submit_button(
+                        "✅ 确认字段并开始分析", type="primary", width="stretch"
+                    )
+
+                if submitted:
+                    try:
+                        mapped_df = apply_column_mapping(raw_upload_df, field_to_source)
+                        validation_errors, validation_warnings = validate_mapped_orders(mapped_df)
+
+                        if validation_errors:
+                            for message in validation_errors:
+                                st.error("❌ " + message)
                         else:
-                            upload_df["status_norm"] = "completed"
-                            st.info("ℹ️ 未检测到 status 列，已默认全部视为 completed（已完成），请在分析时留意。")
+                            missing_dimensions = detect_missing_dimensions(mapped_df)
+                            cleaned_df, clean_report = clean_pipeline(
+                                mapped_df,
+                                df_products=pd.DataFrame(),
+                                df_users=pd.DataFrame(),
+                            )
+                            cleaned_df = prepare_orders_dataframe(cleaned_df)
 
-                        # 缺失维度必须在防御性补列之前检测
-                        missing_dimensions = detect_missing_dimensions(upload_df)
-                        st.session_state["missing_dimensions"] = missing_dimensions
-
-                        if missing_dimensions:
-                            st.warning("⚠️ 检测到关键维度缺失：" + "、".join(missing_dimensions))
-
-                        cleaned_df, clean_report = clean_pipeline(upload_df, df_products, df_users)
-                        cleaned_df = prepare_orders_dataframe(cleaned_df)
-
-                        st.session_state["upload_success"] = True
-                        st.session_state["upload_count"] = len(cleaned_df)
-                        st.session_state["upload_name"] = uploaded_orders.name
-                        st.session_state["uploaded_df"] = cleaned_df
-                        st.session_state["clean_report"] = clean_report
-                        st.rerun()
+                            if cleaned_df.empty:
+                                st.error("❌ 清洗后没有有效订单。请重新检查订单时间字段是否选择正确。")
+                            else:
+                                st.session_state["upload_success"] = True
+                                st.session_state["upload_count"] = len(cleaned_df)
+                                st.session_state["upload_order_count"] = int(cleaned_df["order_id"].nunique())
+                                st.session_state["upload_name"] = uploaded_orders.name
+                                st.session_state["uploaded_df"] = cleaned_df
+                                st.session_state["clean_report"] = validation_warnings + clean_report
+                                st.session_state["missing_dimensions"] = missing_dimensions
+                                st.session_state["upload_has_user_level"] = "user_level" in mapped_df.columns
+                                st.session_state["source_info"] = source_info
+                                st.session_state["confirmed_mapping"] = {
+                                    field: source for field, source in field_to_source.items() if source
+                                }
+                                st.rerun()
+                    except ValueError as exc:
+                        st.error(f"❌ 字段设置有问题：{exc}")
+                    except Exception as exc:
+                        st.error(f"❌ 数据清洗失败：{exc}")
+            except Exception as exc:
+                st.error(f"❌ 文件读取失败：{exc}")
 
     st.markdown("---")
     st.markdown("<div style='text-align:center;color:#aaa;font-size:13px;'>当前展示默认示例数据</div>", unsafe_allow_html=True)
@@ -903,11 +756,12 @@ else:
     with info_col:
         st.success(
             f"✅ 已加载：**{st.session_state.get('upload_name', '自定义数据')}** | "
-            f"共 **{st.session_state.get('upload_count', 0):,}** 条有效订单"
+            f"共 **{st.session_state.get('upload_count', 0):,}** 条有效明细，"
+            f"对应 **{st.session_state.get('upload_order_count', 0):,}** 个去重订单"
         )
     with reset_col:
-        if st.button("🔄 重新上传", use_container_width=True):
-            for key in ["upload_success", "uploaded_df", "upload_count", "upload_name", "clean_report", "missing_dimensions", "upload_has_user_level", "last_insights", "data_quality_report"]:
+        if st.button("🔄 重新上传", width="stretch"):
+            for key in ["upload_success", "uploaded_df", "upload_count", "upload_order_count", "upload_name", "clean_report", "missing_dimensions", "upload_has_user_level", "last_insights", "data_quality_report", "source_info", "confirmed_mapping"]:
                 st.session_state.pop(key, None)
             st.rerun()
 
@@ -915,6 +769,15 @@ else:
     missing_dimensions = st.session_state.get("missing_dimensions", [])
 
     with st.expander("查看数据清洗报告 / 数据质量提醒", expanded=False):
+        confirmed_mapping = st.session_state.get("confirmed_mapping", {})
+        if confirmed_mapping:
+            mapping_display = pd.DataFrame([
+                {"标准字段": field, "原始字段": source}
+                for field, source in confirmed_mapping.items()
+            ])
+            st.markdown("**本次字段对应关系**")
+            st.dataframe(mapping_display, width="stretch", hide_index=True)
+
         if clean_report:
             for item in clean_report:
                 st.write(f"- {item}")
@@ -931,15 +794,41 @@ else:
 # 粒度选择与分析执行
 # =========================
 recommended_granularity = get_recommended_granularity()
-granularity = st.radio(
-    "📅 趋势图",
-    options=["月", "日"],
-    index=0 if recommended_granularity == "月" else 1,
-    horizontal=True,
-    help="数据跨度较短时建议选择「日」，长期数据建议选择「月」。"
-)
+control_col1, control_col2 = st.columns([1, 2])
+with control_col1:
+    granularity = st.radio(
+        "📅 趋势图",
+        options=["月", "日"],
+        index=0 if recommended_granularity == "月" else 1,
+        horizontal=True,
+        help="数据跨度较短时建议选择「日」，长期数据建议选择「月」。"
+    )
 
-results = run_analysis(granularity=granularity)
+status_labels = {
+    "completed": "已完成 / 已支付",
+    "pending": "处理中 / 已发货",
+    "refunded": "退款",
+    "cancelled": "取消 / 关闭",
+    "failed": "失败",
+    "unknown": "未识别状态",
+}
+available_statuses = conn.execute(
+    "SELECT DISTINCT status_norm FROM orders WHERE status_norm IS NOT NULL ORDER BY status_norm"
+).df()["status_norm"].astype(str).tolist()
+default_statuses = ["completed"] if "completed" in available_statuses else available_statuses[:1]
+with control_col2:
+    selected_statuses = st.multiselect(
+        "✅ 参与GMV分析的订单状态",
+        options=available_statuses,
+        default=default_statuses,
+        format_func=lambda value: status_labels.get(value, value),
+        help="不同业务对有效订单的定义不同，请按实际口径选择。退款、取消默认不计入GMV。",
+    )
+
+if not selected_statuses:
+    st.warning("⚠️ 当前没有选择任何有效订单状态，分析结果将为空。")
+
+results = run_analysis(granularity=granularity, selected_statuses=selected_statuses)
 summary = results["summary"]
 monthly = results["monthly"]
 gmv_change_text, gmv_change_value = calc_gmv_change(monthly)
@@ -1031,7 +920,7 @@ with tab_overview:
             )
             .properties(height=360)
         )
-        st.altair_chart(gmv_chart, use_container_width=True)
+        st.altair_chart(gmv_chart, width="stretch")
 
         st.subheader("订单数趋势")
         st.caption("展示每个时间周期的订单数量变化，用折线图观察订单量趋势。")
@@ -1049,7 +938,7 @@ with tab_overview:
             )
             .properties(height=320)
         )
-        st.altair_chart(orders_chart, use_container_width=True)
+        st.altair_chart(orders_chart, width="stretch")
     else:
         st.info("ℹ️ 暂无销售趋势数据。")
 
@@ -1063,7 +952,7 @@ with tab_overview:
         "gmv": "销售额 GMV",
         "users": "用户数",
     })
-    st.dataframe(monthly_display, use_container_width=True, hide_index=True)
+    st.dataframe(monthly_display, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.subheader("订单状态分布")
@@ -1076,7 +965,7 @@ with tab_overview:
             "orders": "订单数",
             "pct": "占比",
         })
-        st.dataframe(status_display, use_container_width=True, hide_index=True)
+        st.dataframe(status_display, width="stretch", hide_index=True)
     else:
         st.info("ℹ️ 暂无订单状态数据。")
 
@@ -1111,7 +1000,7 @@ with tab_product:
             )
             .properties(height=max(320, min(520, len(top_plot_df) * 36)))
         )
-        st.altair_chart(top_chart, use_container_width=True)
+        st.altair_chart(top_chart, width="stretch")
 
         top_display = top_df.copy()
         top_display["revenue"] = top_display["revenue"].apply(money_fmt)
@@ -1122,7 +1011,7 @@ with tab_product:
             "total_qty": "销量",
             "revenue": "销售额",
         })
-        st.dataframe(top_display, use_container_width=True, hide_index=True)
+        st.dataframe(top_display, width="stretch", hide_index=True)
     else:
         st.info("ℹ️ 暂无商品销售数据。")
 
@@ -1151,7 +1040,7 @@ with tab_product:
                 )
                 .properties(height=430)
             )
-            st.altair_chart(pie_chart, use_container_width=True)
+            st.altair_chart(pie_chart, width="stretch")
 
             st.markdown("**各品类 GMV 对比**")
             st.caption("用于对比不同品类的绝对销售额大小。")
@@ -1169,7 +1058,7 @@ with tab_product:
                 )
                 .properties(height=320)
             )
-            st.altair_chart(category_bar, use_container_width=True)
+            st.altair_chart(category_bar, width="stretch")
         else:
             st.info("ℹ️ 当前品类 GMV 均为空或小于等于 0，无法绘制品类图。")
 
@@ -1182,11 +1071,11 @@ with tab_product:
             "qty": "销量",
         })
         st.subheader("品类明细")
-        st.dataframe(cat_display, use_container_width=True, hide_index=True)
+        st.dataframe(cat_display, width="stretch", hide_index=True)
     else:
         st.info("ℹ️ 暂无品类数据。")
 
-    margin_df = build_margin_df()
+    margin_df = build_margin_df(selected_statuses)
     if len(margin_df) > 0:
         st.markdown("---")
         st.subheader("💹 品类毛利分析")
@@ -1203,7 +1092,7 @@ with tab_product:
             "gross_profit": "毛利",
             "gross_margin_pct": "毛利率",
         })
-        st.dataframe(margin_display, use_container_width=True, hide_index=True)
+        st.dataframe(margin_display, width="stretch", hide_index=True)
 
 
 # -------------------------
@@ -1258,7 +1147,7 @@ with tab_insight:
                 )
                 .properties(height=320)
             )
-            st.altair_chart(spend_chart, use_container_width=True)
+            st.altair_chart(spend_chart, width="stretch")
         with u_col2:
             repurchase_chart = (
                 alt.Chart(repurchase_df)
@@ -1274,7 +1163,7 @@ with tab_insight:
                 )
                 .properties(height=320)
             )
-            st.altair_chart(repurchase_chart, use_container_width=True)
+            st.altair_chart(repurchase_chart, width="stretch")
         repurchase_display = repurchase_df.copy()
         repurchase_display["avg_spend"] = repurchase_display["avg_spend"].apply(money_fmt)
         repurchase_display["repurchase_rate"] = repurchase_display["repurchase_rate"].apply(pct_fmt)
@@ -1285,12 +1174,12 @@ with tab_insight:
             "avg_spend": "平均消费金额",
             "repurchase_rate": "复购率",
         })
-        st.dataframe(repurchase_display, use_container_width=True, hide_index=True)
+        st.dataframe(repurchase_display, width="stretch", hide_index=True)
     else:
         # 切换为订单用户消费行为分析
         st.subheader("👥 用户消费行为分析")
         if switch_to_consumption:
-            st.warning("⚠️ 当前上传数据无法与用户等级表匹配，已切换为订单用户消费分析。")
+            st.info("ℹ️ 当前数据未提供有效用户等级，已展示订单用户消费分析。")
 
         if len(users_df) > 0 and "total_spend" in users_df.columns:
             top10_df = users_df.head(10).copy()
@@ -1312,7 +1201,7 @@ with tab_insight:
                 )
                 .properties(height=max(320, min(520, len(top10_plot) * 36)))
             )
-            st.altair_chart(user_spend_chart, use_container_width=True)
+            st.altair_chart(user_spend_chart, width="stretch")
 
         if len(users_df) > 0 and "order_count" in users_df.columns:
             st.subheader("📊 用户订单次数分布")
@@ -1343,7 +1232,7 @@ with tab_insight:
                 )
                 .properties(height=320)
             )
-            st.altair_chart(order_count_chart, use_container_width=True)
+            st.altair_chart(order_count_chart, width="stretch")
 
         if len(users_df) > 0:
             st.subheader("💰 高价值用户 Top 20 明细")
@@ -1356,7 +1245,7 @@ with tab_insight:
                 "order_count": "订单数",
                 "total_spend": "累计消费金额",
             })
-            st.dataframe(users_display, use_container_width=True, hide_index=True)
+            st.dataframe(users_display, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.subheader("⚠️ 异常订单检测")
@@ -1389,13 +1278,13 @@ with tab_insight:
             "city": "城市",
             "is_anomaly": "是否异常",
         })
-        st.dataframe(high_value_display, use_container_width=True, hide_index=True)
+        st.dataframe(high_value_display, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.subheader("🚀 商业报告生成")
     st.info("点击按钮后，系统会基于当前统计结果生成销售结论、商品/品类表现、异常检测、用户分析与经营建议。")
 
-    if st.button("🚀 生成 AI 报告", type="primary", use_container_width=True):
+    if st.button("🚀 生成 AI 报告", type="primary", width="stretch"):
         with st.spinner("AI 正在分析当前数据..."):
             safe_results = dict(results)
 
@@ -1414,7 +1303,7 @@ with tab_insight:
                 data=insights,
                 file_name=f"ai_insights_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
                 mime="text/markdown",
-                use_container_width=True,
+                width="stretch",
             )
 
 
