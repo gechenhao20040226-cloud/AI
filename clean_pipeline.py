@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -27,6 +29,31 @@ def _blank_mask(series):
     return series.isna() | series.astype(str).str.strip().str.lower().isin(
         {"", "nan", "none", "null", "unknown", "未知"}
     )
+
+
+def _main_category_value(value):
+    """将类目路径压缩为主类目；主类目为空时再回退到后续小类目。"""
+    if value is None or pd.isna(value):
+        return "未分类"
+
+    text = str(value).strip()
+    if not text:
+        return "未分类"
+
+    # 常见后台会导出“家居生活/厨房餐具/水杯”一类完整类目路径。
+    # 品类分析只保留第一个有效层级，避免把二、三级类目拆成大量碎片。
+    parts = re.split(r"\s*(?:/|＞|>|→|\|)\s*", text)
+    invalid = {"", "nan", "none", "null", "unknown", "未知", "未分类"}
+    for part in parts:
+        candidate = part.strip()
+        if candidate.lower() not in invalid:
+            return candidate
+    return "未分类"
+
+
+def normalize_main_category_series(series):
+    """批量提取主类目。"""
+    return series.apply(_main_category_value)
 
 
 def clean_pipeline(df_orders, df_products=None, df_users=None, anomaly_threshold=None):
@@ -100,6 +127,20 @@ def clean_pipeline(df_orders, df_products=None, df_users=None, anomaly_threshold
             df.loc[missing_city, "city"] = df.loc[missing_city, "user_id"].map(user_city)
             report.append(f"city 缺失 {missing_count} 条 → 已尝试用本次提供的用户表补充")
         df.loc[_blank_mask(df["city"]), "city"] = "未知"
+
+    # 品类分析优先使用商品主类目。
+    # 例如“家居生活/厨房餐具/水杯”统一归为“家居生活”；
+    # 当前层级为空或未分类时，才回退到后续小类目。
+    if "category" in df.columns:
+        original_category = df["category"].copy()
+        df["category"] = normalize_main_category_series(df["category"])
+        simplified_count = int(
+            original_category.fillna("").astype(str).str.strip().ne(df["category"].astype(str)).sum()
+        )
+        if simplified_count:
+            report.append(
+                f"category 有 {simplified_count} 条完整类目路径 → 已按商品主类目汇总"
+            )
 
     # 4. 只删除完全相同的重复明细，不误删同一订单中的合法商品行
     duplicate_subset = [c for c in df.columns if c not in {"is_anomaly", "status_norm"}]
